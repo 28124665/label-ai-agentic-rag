@@ -1,0 +1,53 @@
+data-knowledge-api:
+  host: ${RAGFLOW_HOST:-0.0.0.0}
+  http_port: 9380
+admin:
+  host: ${RAGFLOW_HOST:-0.0.0.0}
+  http_port: 9381
+
+redis:
+  db: '${REDIS_DB:-1}'
+  username: '${REDIS_USERNAME:-}'
+  password: '${REDIS_PASSWORD:-***REDACTED***}'
+  # Same as docker-compose REDIS_PORT mapping: host app use e.g. REDIS_HOST=127.0.0.1 REDIS_PORT=16379 when mapping 16379:6379
+  host: '${REDIS_HOST:-redis}:${REDIS_PORT:-6379}'
+
+task_executor:
+  message_queue_type: '${TASK_EXECUTOR_MQ_TYPE:-redis}'
+
+user_default_llm:
+  default_models:
+    embedding_model:
+      api_key: 'xxx'
+      base_url: 'http://${TEI_HOST:-tei}:80'
+
+# Peewee / legacy Postgres block (optional; align with conf/service_conf.yaml when used)
+postgres:
+  host: '${POSTGRES_HOST:-postgres}'
+  port: ${POSTGRES_PORT:-5432}
+  name: '${POSTGRES_DBNAME:-rag_flow}'
+  user: '${POSTGRES_USER:-rag_flow}'
+  password: '${POSTGRES_PASSWORD:-infini_rag_flow}'
+  max_connections: ${POSTGRES_MAX_CONNECTIONS:-100}
+  stale_timeout: ${POSTGRES_STALE_TIMEOUT:-30}
+
+postgresql:
+  host: '${POSTGRESQL_HOST:-postgres}'
+  port: ${POSTGRESQL_PORT:-5432}
+  name: '${POSTGRESQL_DBNAME:-boss_ai_data}'
+  user: '${POSTGRESQL_USER:-honghai_ai_rw}'
+  password: '${POSTGRESQL_PASSWORD:-***REDACTED***}'
+  max_connections: ${POSTGRESQL_MAX_CONNECTIONS:-100}
+  stale_timeout: ${POSTGRESQL_STALE_TIMEOUT:-30}
+
+# Aliyun OSS / S3-compatible; set OSS_* in docker/.env (do not commit real keys)
+oss:
+  access_key: '${OSS_ACCESS_KEY:-***REDACTED***}'
+  secret_key: '${OSS_SECRET_KEY:-***REDACTED***}'
+  endpoint_url: '${OSS_ENDPOINT_URL:-http://10.11.7.53:9000}'
+  region: '${OSS_REGION:-us-east-1}'
+  bucket: '${OSS_BUCKET:-boss-ai}'
+  signature_version: '${OSS_SIGNATURE_VERSION:-s3}'
+  addressing_style: '${OSS_ADDRESSING_STYLE:-virtual}'
+  prefix_path: '${OSS_PREFIX_PATH:-boss_ai/knowledge_data/}'
+
