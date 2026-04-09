@@ -1,0 +1,280 @@
+# Deps image: models/tika/chrome/uv from download_deps + Dockerfile.deps, or pull a prebuilt image.
+#
+# NOTE: `FROM ${DEPS_IMAGE}` is pulled by the Docker daemon. If you see "auth.docker.io ... i/o timeout", either:
+#   1) Configure Docker daemon HTTP(S) proxy / registry-mirrors, or
+#   2) Huawei SWR public Docker Hub cache (anonymous pull). Do NOT use .../infiniflow/ragflow_deps
+#      (that path returns 401); use the ddn-k8s/docker.io prefix like other Hub mirrors in this repo:
+#        --build-arg DEPS_IMAGE=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/infiniflow/ragflow_deps:latest
+#   3) Local: uv run download_deps.py && docker build -f Dockerfile.deps -t infiniflow/ragflow_deps:latest .
+#      then: --build-arg DEPS_IMAGE=infiniflow/ragflow_deps:latest (no remote pull if already loaded)
+#
+# Pin version via build-arg when your registry has a tag (e.g. v0.24.0); `latest` is the common deps tag.
+ARG DEPS_IMAGE=infiniflow/ragflow_deps:latest
+# Base OS image: if Docker Hub times out, use the same Huawei Hub cache as DEPS_IMAGE, e.g.:
+#   --build-arg BASE_IMAGE=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/ubuntu:24.04
+# (docker.m.daocloud.io often returns 401 for anonymous manifest HEAD; avoid unless you docker login there.)
+ARG BASE_IMAGE=ubuntu:24.04
+
+# Named stage for deps (--mount from= does not support ${VAR}, only stage alias or literal image name)
+FROM ${DEPS_IMAGE} AS deps
+
+# base stage
+FROM ${BASE_IMAGE} AS base
+USER root
+SHELL ["/bin/bash", "-c"]
+
+ARG NEED_MIRROR=0
+
+WORKDIR /data-knowledge-api
+
+# copy models downloaded via download_deps.py
+RUN mkdir -p /data-knowledge-api/rag/res/deepdoc /root/.data-knowledge-api
+RUN --mount=type=bind,from=deps,source=/huggingface.co,target=/huggingface.co \
+    tar --exclude='.*' -cf - \
+        /huggingface.co/InfiniFlow/text_concat_xgb_v1.0 \
+        /huggingface.co/InfiniFlow/deepdoc \
+        | tar -xf - --strip-components=3 -C /data-knowledge-api/rag/res/deepdoc
+
+# https://github.com/chrismattmann/tika-python
+# This is the only way to run python-tika without internet access. Without this set, the default is to check the tika version and pull latest every time from Apache.
+# Prebuilt ragflow_deps tags may use a different Tika version or path than Dockerfile.deps (root); resolve by glob + stable symlink.
+RUN --mount=type=bind,from=deps,source=/,target=/deps \
+    cp -r /deps/nltk_data /root/ && \
+    TIKA_JAR=$(find /deps -type f -name 'tika-server-standard-*.jar' ! -name '*.md5' | head -1) && \
+    test -n "$TIKA_JAR" || (echo "No tika-server-standard-*.jar under /deps:"; ls -laR /deps | head -80; exit 1) && \
+    TIKA_BASE=$(basename "$TIKA_JAR") && \
+    TIKA_DIR=$(dirname "$TIKA_JAR") && \
+    cp "$TIKA_JAR" /data-knowledge-api/ && \
+    if [ -f "$TIKA_DIR/$TIKA_BASE.md5" ]; then cp "$TIKA_DIR/$TIKA_BASE.md5" /data-knowledge-api/; fi && \
+    ln -sf "$TIKA_BASE" /data-knowledge-api/tika-server-standard.jar && \
+    cp /deps/cl100k_base.tiktoken /data-knowledge-api/9b5ad71b2ce5302211f9c61530b329a4922fc6a4
+
+ENV TIKA_SERVER_JAR="file:///data-knowledge-api/tika-server-standard.jar"
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Setup apt
+# Python package and implicit dependencies:
+# opencv-python: libglib2.0-0 libglx-mesa0 libgl1
+# python-pptx:   default-jdk                              tika-server-standard-3.2.3.jar
+# selenium:      libatk-bridge2.0-0                       chrome-linux64-121-0-6167-85
+# Building C extensions: libpython3-dev libgtk-4-1 libnss3 xdg-utils libgbm-dev
+RUN --mount=type=cache,id=data-knowledge-api_apt,target=/var/cache/apt,sharing=locked \
+    apt update && \
+    apt --no-install-recommends install -y ca-certificates; \
+    if [ "$NEED_MIRROR" == "1" ]; then \
+        sed -i 's|http://archive.ubuntu.com/ubuntu|https://mirrors.tuna.tsinghua.edu.cn/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources; \
+        sed -i 's|http://security.ubuntu.com/ubuntu|https://mirrors.tuna.tsinghua.edu.cn/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources; \
+    fi; \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache && \
+    chmod 1777 /tmp && \
+    apt update && \
+    apt install -y libglib2.0-0 libglx-mesa0 libgl1 && \
+    apt install -y pkg-config libicu-dev libgdiplus && \
+    apt install -y default-jdk && \
+    apt install -y libatk-bridge2.0-0 && \
+    apt install -y libpython3-dev libgtk-4-1 libnss3 xdg-utils libgbm-dev && \
+    apt install -y libjemalloc-dev && \
+    apt install -y gnupg unzip curl wget git vim less && \
+    apt install -y ghostscript && \
+    apt install -y pandoc && \
+    apt install -y texlive && \
+    apt install -y fonts-freefont-ttf fonts-noto-cjk && \
+    apt install -y postgresql-client
+
+# Download resource from GitHub to /usr/share/infinity
+RUN mkdir -p /usr/share/infinity/resource && \
+    if [ "$NEED_MIRROR" == "1" ]; then \
+        git clone --depth 1 --single-branch https://gitee.com/infiniflow/resource /tmp/resource; \
+    else \
+        git clone --depth 1 --single-branch https://github.com/infiniflow/resource.git /tmp/resource; \
+    fi && \
+    cp -r /tmp/resource/* /usr/share/infinity/resource && \
+    rm -rf /tmp/resource
+
+ARG NGINX_VERSION=1.29.5-1~noble
+RUN --mount=type=cache,id=data-knowledge-api_apt,target=/var/cache/apt,sharing=locked \
+    mkdir -p /etc/apt/keyrings && \
+    curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor -o /etc/apt/keyrings/nginx-archive-keyring.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/mainline/ubuntu/ noble nginx" > /etc/apt/sources.list.d/nginx.list && \
+    apt update && \
+    apt install -y nginx=${NGINX_VERSION} && \
+    apt-mark hold nginx && \
+    rm -f /etc/nginx/conf.d/default.conf
+
+# Install uv (prebuilt ragflow_deps may omit or relocate uv tarballs vs Dockerfile.deps)
+ARG UV_VERSION=0.9.16
+RUN --mount=type=bind,from=deps,source=/,target=/deps \
+    if [ "$NEED_MIRROR" == "1" ]; then \
+        mkdir -p /etc/uv && \
+        echo 'python-install-mirror = "https://registry.npmmirror.com/-/binary/python-build-standalone/"' > /etc/uv/uv.toml && \
+        echo '[[index]]' >> /etc/uv/uv.toml && \
+        echo 'url = "https://pypi.tuna.tsinghua.edu.cn/simple"' >> /etc/uv/uv.toml && \
+        echo 'default = true' >> /etc/uv/uv.toml; \
+    fi; \
+    arch="$(uname -m)"; \
+    if [ "$arch" = "x86_64" ]; then uv_arch="x86_64"; else uv_arch="aarch64"; fi; \
+    UV_TGZ=$(find /deps -type f -name "uv-${uv_arch}-unknown-linux-*.tar.gz" 2>/dev/null | head -1); \
+    if [ -z "$UV_TGZ" ] || [ ! -f "$UV_TGZ" ]; then UV_TGZ="/deps/uv-${uv_arch}-unknown-linux-gnu.tar.gz"; fi; \
+    if [ ! -f "$UV_TGZ" ]; then \
+        UV_URL="https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_arch}-unknown-linux-gnu.tar.gz"; \
+        echo "uv tarball not in deps image; downloading ${UV_URL}"; \
+        curl -fsSL "$UV_URL" -o /tmp/uv-dist.tar.gz; \
+        UV_TGZ=/tmp/uv-dist.tar.gz; \
+    fi; \
+    UV_DIR=$(tar tzf "$UV_TGZ" | head -1 | cut -d/ -f1) && \
+    tar xzf "$UV_TGZ" && \
+    cp "${UV_DIR}/"* /usr/local/bin/ && \
+    rm -rf "${UV_DIR}" && \
+    rm -f /tmp/uv-dist.tar.gz && \
+    uv python install 3.12
+
+ENV PYTHONDONTWRITEBYTECODE=1 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+ENV PATH=/root/.local/bin:$PATH
+
+# nodejs 12.22 on Ubuntu 22.04 is too old
+RUN --mount=type=cache,id=ragflow_apt,target=/var/cache/apt,sharing=locked \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt purge -y nodejs npm cargo && \
+    apt autoremove -y && \
+    apt update && \
+    apt install -y nodejs
+
+# A modern version of cargo is needed for the latest version of the Rust compiler.
+RUN apt update && apt install -y curl build-essential \
+    && if [ "$NEED_MIRROR" == "1" ]; then \
+         # Use TUNA mirrors for rustup/rust dist files \
+         export RUSTUP_DIST_SERVER="https://mirrors.tuna.tsinghua.edu.cn/rustup"; \
+         export RUSTUP_UPDATE_ROOT="https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup"; \
+         echo "Using TUNA mirrors for Rustup."; \
+       fi; \
+    # Force curl to use HTTP/1.1 \
+    curl --proto '=https' --tlsv1.2 --http1.1 -sSf https://sh.rustup.rs | bash -s -- -y --profile minimal \
+    && echo 'export PATH="/root/.cargo/bin:${PATH}"' >> /root/.bashrc
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN cargo --version && rustc --version
+
+# Add msssql ODBC driver
+# macOS ARM64 environment, install msodbcsql18.
+# general x86_64 environment, install msodbcsql17.
+RUN --mount=type=cache,id=data-knowledge-api_apt,target=/var/cache/apt,sharing=locked \
+    curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add - && \
+    curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list > /etc/apt/sources.list.d/mssql-release.list && \
+    apt update && \
+    arch="$(uname -m)"; \
+    if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then \
+        # ARM64 (macOS/Apple Silicon or Linux aarch64) \
+        ACCEPT_EULA=Y apt install -y unixodbc-dev msodbcsql18; \
+    else \
+        # x86_64 or others \
+        ACCEPT_EULA=Y apt install -y unixodbc-dev msodbcsql17; \
+    fi || \
+    { echo "Failed to install ODBC driver"; exit 1; }
+
+
+
+# Add dependencies of selenium
+RUN --mount=type=bind,from=deps,source=/chrome-linux64-121-0-6167-85,target=/chrome-linux64.zip \
+    unzip /chrome-linux64.zip && \
+    mv chrome-linux64 /opt/chrome && \
+    ln -s /opt/chrome/chrome /usr/local/bin/
+RUN --mount=type=bind,from=deps,source=/chromedriver-linux64-121-0-6167-85,target=/chromedriver-linux64.zip \
+    unzip -j /chromedriver-linux64.zip chromedriver-linux64/chromedriver && \
+    mv chromedriver /usr/local/bin/ && \
+    rm -f /usr/bin/google-chrome
+
+RUN --mount=type=bind,from=deps,source=/,target=/deps \
+    if [ "$(uname -m)" = "x86_64" ]; then \
+        dpkg -i /deps/libssl1.1_1.1.1f-1ubuntu2_amd64.deb; \
+    elif [ "$(uname -m)" = "aarch64" ]; then \
+        dpkg -i /deps/libssl1.1_1.1.1f-1ubuntu2_arm64.deb; \
+    fi
+
+
+# builder stage
+FROM base AS builder
+USER root
+
+WORKDIR /data-knowledge-api
+
+# install dependencies from uv.lock file
+COPY pyproject.toml uv.lock ./
+
+# https://github.com/astral-sh/uv/issues/10462
+# uv records index url into uv.lock but doesn't failover among multiple indexes
+RUN --mount=type=cache,id=data-knowledge-api_uv,target=/root/.cache/uv,sharing=locked \
+    if [ "$NEED_MIRROR" == "1" ]; then \
+        sed -i 's|pypi.org|pypi.tuna.tsinghua.edu.cn|g' uv.lock; \
+    else \
+        sed -i 's|pypi.tuna.tsinghua.edu.cn|pypi.org|g' uv.lock; \
+    fi; \
+    uv sync --python 3.12 --frozen && \
+    # Ensure pip is available in the venv for runtime package installation (fixes #12651) \
+    .venv/bin/python3 -m ensurepip --upgrade
+
+COPY web web
+COPY docs docs
+RUN --mount=type=cache,id=data-knowledge-api_npm,target=/root/.npm,sharing=locked \
+    export NODE_OPTIONS="--max-old-space-size=4096" && \
+    export VITE_NO_SOURCEMAP=1 && \
+    export VITE_MINIFY=esbuild && \
+    cd web && npm install && npm run build
+
+COPY .git /data-knowledge-api/.git
+
+RUN version_info=$(git describe --tags --match=v* --first-parent --always); \
+    version_info="$version_info"; \
+    echo "data-knowledge-api version: $version_info"; \
+    echo $version_info > /data-knowledge-api/VERSION
+
+# production stage
+FROM base AS production
+USER root
+
+WORKDIR /data-knowledge-api
+
+# Copy Python environment and packages
+ENV VIRTUAL_ENV=/data-knowledge-api/.venv
+COPY --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+ENV PYTHONPATH=/data-knowledge-api/
+
+COPY web web
+COPY admin admin
+COPY api api
+COPY conf conf
+COPY deepdoc deepdoc
+COPY rag rag
+COPY agent agent
+COPY pyproject.toml uv.lock ./
+COPY mcp mcp
+COPY common common
+COPY memory memory
+
+RUN if [ -d bin ]; then \
+        cp -r bin ./; \
+        echo "✓ bin copied"; \
+    else \
+        echo "✗ bin ignored"; \
+    fi
+
+# Entire docker/ tree under app dir (compose yml, scripts, nginx sources) for K8s parity.
+# Runtime paths: entrypoint + service template at legacy locations; nginx at /etc/nginx (see RUN below).
+# Local secrets under docker/.env* are excluded via repository .dockerignore.
+COPY docker /data-knowledge-api/docker
+RUN cp /data-knowledge-api/docker/entrypoint.sh /data-knowledge-api/ && \
+    chmod +x /data-knowledge-api/entrypoint*.sh && \
+    cp /data-knowledge-api/docker/service_conf.yaml.template /data-knowledge-api/conf/service_conf.yaml.template && \
+    cp /data-knowledge-api/docker/nginx/nginx.conf /etc/nginx/nginx.conf && \
+    cp /data-knowledge-api/docker/nginx/data-knowledge-api.conf /etc/nginx/conf.d/data-knowledge-api.conf && \
+    cp /data-knowledge-api/docker/nginx/proxy.conf /etc/nginx/proxy.conf && \
+    rm -f /etc/nginx/conf.d/default.conf
+
+# Copy compiled web pages
+COPY --from=builder /data-knowledge-api/web/dist /data-knowledge-api/web/dist
+
+COPY --from=builder /data-knowledge-api/VERSION /data-knowledge-api/VERSION
+ENTRYPOINT ["./entrypoint.sh"]

@@ -1,0 +1,59 @@
+###AGFlow 主服务：
+export CRAWL4_AI_BASE_DIRECTORY=/Users/yzab19880000/Documents/wzg/py-project/data-knowledge-api
+export DB_TYPE=postgres
+export STORAGE_IMPL=OSS
+export PYTHONPATH=$(pwd)
+source .venv/bin/activate
+python3 api/data-knowledge-api_server.py
+
+###Task Executor 服务：
+export CRAWL4_AI_BASE_DIRECTORY=/Users/yzab19880000/Documents/wzg/py-project/data-knowledge-api
+export DB_TYPE=postgres
+export STORAGE_IMPL=OSS
+export PYTHONPATH=$(pwd)
+source .venv/bin/activate
+python3 rag/svr/task_executor.py 0
+
+
+# 启动redis
+brew services start redis/ 2.brew services stop redis（停止服务)/ 3.brew services restart redis (重启服务 )
+
+# 启动所有后端服务
+export PYTHONPATH=$(pwd)  && source docker/.env && bash docker/launch_backend_service.sh
+
+# 启动后台服务
+export PYTHONPATH=$(pwd)  && source docker/.env && python3 api/data-knowledge-api_server.py
+
+# 启动定时任务
+export PYTHONPATH=$(pwd)  && source docker/.env && python3 rag/svr/task_executor.py 0
+
+# 启动前端服务
+cd web
+# npm install
+npm run dev
+
+# 访问地址:—
+# 前端: (http://localhost:9222/ )/ 2.后端：( http://localhost:8000/ )
+
+# 其他服务操作:—
+# 1.停止服务(pkill -f "ragflow_server.py|task_executor.py") / 2.重启前端(在 web 目录下运行 npm run dev)/ 3.重启后端(运行 bash docker/launch_backend_service
+
+
+###测试调千问模型
+python docs/wangzg/query.py /Users/yzab19880000/Documents/wzg/doc/test/PIC/fuza
+
+###版本查看
+https://github.com/infiniflow/ragflow/releases
+
+###零一万物-嵌入模型-调用方式
+curl -k -sS "https://ksrun.ai.foxconn.com/zerone-ai/baai-bge-m3/v1/embeddings" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -d '{
+    "model": "bge-m3",
+    "input": [
+      "向量数据库用于相似度检索。",
+      "关系型数据库适合事务处理。"
+    ]
+  }'
+

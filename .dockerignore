@@ -1,0 +1,1 @@
+# Do not bake local secrets into images (K8s / compose should inject env at runtime).
