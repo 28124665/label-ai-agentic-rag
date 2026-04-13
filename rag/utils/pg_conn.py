@@ -123,7 +123,7 @@ class PGConnection(PGConnectionBase):
                         self.logger.debug(f"Searching document metadata table: {table_name}")
                         
                         # 确保表存在
-                        if not self.index_exist("", table_name):
+                        if not self.index_exist(index_name, kb_id):
                             self.logger.info(f"Creating document metadata table: {table_name}")
                             self.create_doc_meta_idx(index_name)
                         
@@ -183,85 +183,87 @@ class PGConnection(PGConnectionBase):
                         for vector_size in default_vector_sizes:
                             table_name = self._get_fixed_table_name(index_name, kb_id, vector_size)
                             self.logger.debug(f"Searching table: {table_name}, vector_size: {vector_size}")
-                            
-                            # 确保表存在
-                            if not self.index_exist("", table_name):
-                                self.logger.info(f"Creating table: {table_name}")
-                                self.create_idx(index_name, kb_id, vector_size)
+
+                            # Do not create tables from search (insert path creates as needed). Otherwise
+                            # cleanup paths that search the base index (e.g. graphrag) would spuriously
+                            # create ragflow_doc_embeddings_1024 while chunks live in message_type tables.
+                            if not self.index_exist(index_name, kb_id, vector_size):
+                                self.logger.debug(f"Skipping search, table does not exist: {table_name}")
+                                continue
+
+                            # Build WHERE clause
+                            where_clauses = []
+                            params = []
+
+                            # Add kb_id condition
+                            where_clauses.append("kb_id = %s")
+                            params.append(kb_id)
+
+                            # Add other conditions
+                            for k, v in condition.items():
+                                if k == "available_int":
+                                    if v == 0:
+                                        where_clauses.append("available_int < 1")
+                                    else:
+                                        where_clauses.append("available_int >= 1")
+                                elif v:
+                                    if isinstance(v, list):
+                                        placeholders = ",".join(["%s"] * len(v))
+                                        where_clauses.append(f"{k} IN ({placeholders})")
+                                        params.extend(v)
+                                    else:
+                                        where_clauses.append(f"{k} = %s")
+                                        params.append(v)
+
+                            where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
+
+                            # Build query
+                            query = f"SELECT * FROM {table_name} WHERE {where_clause}"
+
+                            # Add vector search if MatchDenseExpr is present
+                            vector_expr = None
+                            for expr in match_expressions:
+                                if isinstance(expr, MatchDenseExpr):
+                                    vector_column = expr.vector_column_name
+                                    embedding = expr.embedding_data
+                                    topn = expr.topn
+
+                                    # Add vector similarity search
+                                    query += f" ORDER BY {vector_column} <-> %s LIMIT %s OFFSET %s"
+                                    params.extend([embedding, limit, offset])
+                                    vector_expr = expr
+                                    break
                             else:
-                                # Build WHERE clause
-                                where_clauses = []
-                                params = []
+                                # No vector search, add limit and offset
+                                query += f" LIMIT %s OFFSET %s"
+                                params.extend([limit, offset])
 
-                                # Add kb_id condition
-                                where_clauses.append("kb_id = %s")
-                                params.append(kb_id)
+                            # Execute query
+                            try:
+                                self.logger.debug(f"Executing search query: {query}")
+                                cursor.execute(query, params)
+                                results = cursor.fetchall()
 
-                                # Add other conditions
-                                for k, v in condition.items():
-                                    if k == "available_int":
-                                        if v == 0:
-                                            where_clauses.append("available_int < 1")
-                                        else:
-                                            where_clauses.append("available_int >= 1")
-                                    elif v:
-                                        if isinstance(v, list):
-                                            placeholders = ",".join(["%s"] * len(v))
-                                            where_clauses.append(f"{k} IN ({placeholders})")
-                                            params.extend(v)
-                                        else:
-                                            where_clauses.append(f"{k} = %s")
-                                            params.append(v)
-
-                                where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
-
-                                # Build query
-                                query = f"SELECT * FROM {table_name} WHERE {where_clause}"
-
-                                # Add vector search if MatchDenseExpr is present
-                                vector_expr = None
-                                for expr in match_expressions:
-                                    if isinstance(expr, MatchDenseExpr):
-                                        vector_column = expr.vector_column_name
-                                        embedding = expr.embedding_data
-                                        topn = expr.topn
-
-                                        # Add vector similarity search
-                                        query += f" ORDER BY {vector_column} <-> %s LIMIT %s OFFSET %s"
-                                        params.extend([embedding, limit, offset])
-                                        vector_expr = expr
-                                        break
-                                else:
-                                    # No vector search, add limit and offset
-                                    query += f" LIMIT %s OFFSET %s"
-                                    params.extend([limit, offset])
-
-                                # Execute query
-                                try:
-                                    self.logger.debug(f"Executing search query: {query}")
-                                    cursor.execute(query, params)
-                                    results = cursor.fetchall()
-
-                                    # Format results
-                                    for row in results:
-                                        hit = {
-                                            "_id": row[0],
-                                            "_source": {
-                                                "id": row[0],
-                                                "content": row[1],
-                                                "content_with_weight": row[2],
-                                                "doc_id": row[5],
-                                                "kb_id": row[9],
-                                                "source_path": row[10],
-                                                "available_int": row[11]
-                                            }
+                                # Format results
+                                for row in results:
+                                    hit = {
+                                        "_id": row[0],
+                                        "_source": {
+                                            "id": row[0],
+                                            "content": row[1],
+                                            "content_with_weight": row[2],
+                                            "doc_id": row[5],
+                                            "kb_id": row[9],
+                                            "source_path": row[10],
+                                            "available_int": row[11]
                                         }
-                                        all_hits.append(hit)
+                                    }
+                                    all_hits.append(hit)
 
-                                    total_count += len(results)
-                                except Exception as e:
-                                    self.logger.error(f"Error searching table {table_name}: {e}")
-                                    continue
+                                total_count += len(results)
+                            except Exception as e:
+                                self.logger.error(f"Error searching table {table_name}: {e}")
+                                continue
 
             self.logger.debug(f"Search completed, total hits: {total_count}")
             return {
@@ -293,7 +295,7 @@ class PGConnection(PGConnectionBase):
                     self.logger.debug(f"Getting document from metadata table: {table_name}, id: {data_id}")
 
                     # 确保表存在
-                    if not self.index_exist("", table_name):
+                    if not self.index_exist(index_name, kb_id):
                         self.logger.warning(f"Table {table_name} does not exist, skipping")
                         continue
 
@@ -317,7 +319,7 @@ class PGConnection(PGConnectionBase):
                         self.logger.debug(f"Getting document from table: {table_name}, id: {data_id}")
 
                         # 确保表存在
-                        if not self.index_exist("", table_name):
+                        if not self.index_exist(index_name, kb_id, vector_size):
                             self.logger.warning(f"Table {table_name} does not exist, skipping")
                             continue
 
@@ -366,7 +368,7 @@ class PGConnection(PGConnectionBase):
             if index_name.startswith("ragflow_doc_meta_"):
                 table_name = self._get_fixed_table_name(index_name, knowledgebase_id)
                 self.logger.debug(f"Inserting into document metadata table: {table_name}, rows: {len(rows)}")
-                return self._insert_doc_meta(rows, table_name, cursor, conn)
+                return self._insert_doc_meta(rows, table_name, cursor, conn, knowledgebase_id)
 
             # Determine vector size from rows
             vector_size = None
@@ -387,7 +389,7 @@ class PGConnection(PGConnectionBase):
             self.logger.debug(f"Inserting into table: {table_name}, rows: {len(rows)}, vector_size: {vector_size}")
 
             # Create table if not exists
-            if not self.index_exist("", table_name, vector_size):
+            if not self.index_exist(index_name, knowledgebase_id, vector_size):
                 self.create_idx(index_name, knowledgebase_id, vector_size)
 
             # Prepare insert data with all fields
@@ -503,13 +505,13 @@ class PGConnection(PGConnectionBase):
             if conn:
                 self.connPool.putconn(conn)
 
-    def _insert_doc_meta(self, rows: list[dict], table_name: str, cursor, conn) -> list[str]:
+    def _insert_doc_meta(self, rows: list[dict], table_name: str, cursor, conn, knowledgebase_id: str) -> list[str]:
         """
         Insert document metadata into doc_meta table
         """
         try:
-            # Create table if not exists
-            if not self.index_exist("", table_name):
+            # Create table if not exists (table_name equals logical index for doc_meta_*)
+            if not self.index_exist(table_name, knowledgebase_id):
                 self.create_doc_meta_idx(table_name)
 
             insert_data = []

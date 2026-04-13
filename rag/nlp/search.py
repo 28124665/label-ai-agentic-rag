@@ -25,12 +25,23 @@ import numpy as np
 from common.doc_store.doc_store_base import MatchDenseExpr, FusionExpr, OrderByExpr, DocStoreConnection
 from common.string_utils import remove_redundant_spaces
 from common.float_utils import get_float
-from common.constants import PAGERANK_FLD, TAG_FLD
+from common.constants import PAGERANK_FLD, TAG_FLD, MessageTypeEnum
 from common import settings
 
 from common.misc_utils import thread_pool_exec
 
 def index_name(uid): return f"ragflow_{uid}"
+
+
+def doc_index_name(tenant_id: str, message_type: str | None = None) -> str:
+    """
+    Logical doc-store index for chunk embeddings. Must match
+    rag.svr.task_executor.insert_chunks (message_type prefix when applicable).
+    """
+    base = index_name(tenant_id)
+    if message_type and message_type in MessageTypeEnum:
+        return f"{message_type}:{base}"
+    return base
 
 
 class Dealer:

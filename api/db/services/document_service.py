@@ -392,8 +392,10 @@ class DocumentService(CommonService):
             logging.warning(f"Failed to delete thumbnail for document {doc.id}: {e}")
 
         # Delete chunks from doc store - this is critical, log errors
+        # Use same logical index as insert (task_data:ragflow_… etc.); see task_executor.insert_chunks
         try:
-            settings.docStoreConn.delete({"doc_id": doc.id}, search.index_name(tenant_id), doc.kb_id)
+            chunk_index = search.doc_index_name(tenant_id, getattr(doc, "message_type", None))
+            settings.docStoreConn.delete({"doc_id": doc.id}, chunk_index, doc.kb_id)
         except Exception as e:
             logging.error(f"Failed to delete chunks from doc store for document {doc.id}: {e}")
 
@@ -425,11 +427,12 @@ class DocumentService(CommonService):
     @classmethod
     @DB.connection_context()
     def delete_chunk_images(cls, doc, tenant_id):
+        chunk_index = search.doc_index_name(tenant_id, getattr(doc, "message_type", None))
         page = 0
         page_size = 1000
         while True:
             chunks = settings.docStoreConn.search(["img_id"], [], {"doc_id": doc.id}, [], OrderByExpr(),
-                                                  page * page_size, page_size, search.index_name(tenant_id),
+                                                  page * page_size, page_size, chunk_index,
                                                   [doc.kb_id])
             chunk_ids = settings.docStoreConn.get_doc_ids(chunks)
             if not chunk_ids:

@@ -643,8 +643,9 @@ async def run():
                 DocumentService.update_by_id(id, info)
                 if req.get("delete", False):
                     TaskService.filter_delete([Task.doc_id == id])
-                    if settings.docStoreConn.index_exist(search.index_name(tenant_id), doc.kb_id):
-                        settings.docStoreConn.delete({"doc_id": id}, search.index_name(tenant_id), doc.kb_id)
+                    chunk_idx = search.doc_index_name(tenant_id, getattr(doc, "message_type", None))
+                    if settings.docStoreConn.index_exist(chunk_idx, doc.kb_id):
+                        settings.docStoreConn.delete({"doc_id": id}, chunk_idx, doc.kb_id)
 
                 if str(req["run"]) == TaskStatus.RUNNING.value:
                     if req.get("apply_kb"):
@@ -784,8 +785,9 @@ async def change_parser():
             if not tenant_id:
                 return get_data_error_result(message="Tenant not found!")
             DocumentService.delete_chunk_images(doc, tenant_id)
-            if settings.docStoreConn.index_exist(search.index_name(tenant_id), doc.kb_id):
-                settings.docStoreConn.delete({"doc_id": doc.id}, search.index_name(tenant_id), doc.kb_id)
+            chunk_idx = search.doc_index_name(tenant_id, getattr(doc, "message_type", None))
+            if settings.docStoreConn.index_exist(chunk_idx, doc.kb_id):
+                settings.docStoreConn.delete({"doc_id": doc.id}, chunk_idx, doc.kb_id)
         return None
 
     try:
@@ -1023,8 +1025,9 @@ async def run_oss_document():
                 DocumentService.update_by_id(id, info)
                 if req.get("delete", False):
                     TaskService.filter_delete([Task.doc_id == id])
-                    if settings.docStoreConn.index_exist(search.index_name(tenant_id), doc.kb_id):
-                        settings.docStoreConn.delete({"doc_id": id}, search.index_name(tenant_id), doc.kb_id)
+                    chunk_idx = search.doc_index_name(tenant_id, getattr(doc, "message_type", None))
+                    if settings.docStoreConn.index_exist(chunk_idx, doc.kb_id):
+                        settings.docStoreConn.delete({"doc_id": id}, chunk_idx, doc.kb_id)
 
                 if str(req["run"]) == TaskStatus.RUNNING.value:
                     if req.get("apply_kb"):
@@ -1113,3 +1116,51 @@ async def oss_upload_and_run():
         return await thread_pool_exec(_run_sync)
     except Exception as e:
         return server_error_response(e)
+
+@manager.route("/rm_by_user_id", methods=["POST"])  # noqa: F821
+@validate_request("user_id", "source_oss_url", "message_type")
+async def rm_by_user_id():
+    """
+    Resolve documents by the same keys as oss_upload_and_run (user_id, OSS object key from URL, message_type),
+    then delete with the same pipeline as /rm (FileService.delete_docs).
+    """
+    req = await get_request_json()
+    user_id = req.get("user_id")
+    source_oss_url = req.get("source_oss_url")
+    message_type = req.get("message_type")
+
+    if not user_id:
+        return get_json_result(data=False, message='Lack of "User ID"', code=RetCode.ARGUMENT_ERROR)
+    if not source_oss_url:
+        return get_json_result(data=False, message='Lack of "Source OSS URL"', code=RetCode.ARGUMENT_ERROR)
+    if not message_type:
+        return get_json_result(data=False, message='Lack of "Message Type"', code=RetCode.ARGUMENT_ERROR)
+    if message_type not in MessageTypeEnum:
+        return get_json_result(data=False, message='Invalid "Message Type"', code=RetCode.ARGUMENT_ERROR)
+
+    from rag.utils.oss_conn import RAGFlowOSS
+
+    oss_client = RAGFlowOSS()
+    bucket, key = oss_client._parse_oss_url(source_oss_url)
+    if not bucket or not key:
+        return get_json_result(data=False, message=f"Invalid OSS URL: {source_oss_url}", code=RetCode.ARGUMENT_ERROR)
+
+    # Same as FileService.upload_oss_document: location is the object key
+    location = key
+    docs = list(
+        DocumentService.query(created_by=user_id, location=location, message_type=message_type)
+    )
+    if not docs:
+        return get_json_result(data={"deleted": 0, "doc_ids": []})
+
+    doc_ids = [d.id for d in docs]
+    logging.info(
+        f"document_app.rm_by_user_id user_id={user_id}, location={location}, message_type={message_type}, doc_ids={doc_ids}"
+    )
+
+    errors = await thread_pool_exec(FileService.delete_docs, doc_ids, user_id)
+
+    if errors:
+        return get_json_result(data=False, message=errors, code=RetCode.SERVER_ERROR)
+
+    return get_json_result(data={"deleted": len(doc_ids), "doc_ids": doc_ids})
