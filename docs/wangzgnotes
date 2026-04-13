@@ -57,3 +57,6 @@ curl -k -sS "https://ksrun.ai.foxconn.com/zerone-ai/baai-bge-m3/v1/embeddings" \
     ]
   }'
 
+
+ /Users/sjj/project/data-knowledge-api这个也加好日志配置了，记得检查一下path
+service_name = data-knowledge-api
