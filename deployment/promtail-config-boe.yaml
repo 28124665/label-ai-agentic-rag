@@ -1,0 +1,82 @@
+# Promtail - data-knowledge-api BOE（容器内；由 start.sh 启动）
+# 应用日志：common/log_utils.py -> /data-knowledge-api/logs/*.log
+# 格式：%(asctime)-15s %(levelname)-8s %(process)d %(message)s → 例 2026-04-09 18:00:00,123 INFO     12345 msg
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki.log.svc.cluster.local:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: data-knowledge-api-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          service: data-knowledge-api
+          job: data-knowledge-api-logs
+          app: ragflow
+          namespace: honhai
+          environment: boe
+          version: "1.0.0"
+          image: data-knowledge-api
+          product: data-knowledge-api
+          log_format: ragflow_python
+          __path__: /data-knowledge-api/logs/*.log
+    pipeline_stages:
+      - multiline:
+          firstline: '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
+          max_wait_time: 12s
+      - replace:
+          expression: "[\r\n]+"
+          replace: " "
+      - drop:
+          expression: '^\s*$'
+      - regex:
+          # asctime 含 ,毫秒；timestamp 阶段仅解析到秒
+          expression: '^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+\s+(?P<level>\S+)\s+(?P<pid>\d+)\s+(?P<message>.*)$'
+      - labels:
+          level:
+      - timestamp:
+          source: timestamp
+          format: '2006-01-02 15:04:05'
+          location: Asia/Shanghai
+
+  - job_name: data-knowledge-api-nginx-access
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          service: data-knowledge-api
+          job: data-knowledge-api-nginx-access
+          app: ragflow
+          namespace: honhai
+          environment: boe
+          product: data-knowledge-api
+          log_format: nginx_access
+          __path__: /var/log/nginx/access.log
+    pipeline_stages:
+      - drop:
+          expression: '^\s*$'
+
+  - job_name: data-knowledge-api-nginx-error
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          service: data-knowledge-api
+          job: data-knowledge-api-nginx-error
+          app: ragflow
+          namespace: honhai
+          environment: boe
+          product: data-knowledge-api
+          log_format: nginx_error
+          __path__: /var/log/nginx/error.log
+    pipeline_stages:
+      - drop:
+          expression: '^\s*$'

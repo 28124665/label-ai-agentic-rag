@@ -8,7 +8,7 @@ admin:
 redis:
   db: '${REDIS_DB:-1}'
   username: '${REDIS_USERNAME:-}'
-  password: '${REDIS_PASSWORD:-***REDACTED***}'
+  password: '${REDIS_PASSWORD:-}'
   # Same as docker-compose REDIS_PORT mapping: host app use e.g. REDIS_HOST=127.0.0.1 REDIS_PORT=16379 when mapping 16379:6379
   host: '${REDIS_HOST:-redis}:${REDIS_PORT:-6379}'
 

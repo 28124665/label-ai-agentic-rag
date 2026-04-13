@@ -1,4 +1,4 @@
-{{- if eq .Values.env.DOC_ENGINE "infinity" -}}
+{{- if and (eq .Values.env.DOC_ENGINE "infinity") (default true .Values.infinity.enabled) -}}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

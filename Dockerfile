@@ -269,4 +269,22 @@ RUN cp /data-knowledge-api/docker/entrypoint.sh /data-knowledge-api/ && \
 COPY --from=builder /data-knowledge-api/web/dist /data-knowledge-api/web/dist
 
 COPY --from=builder /data-knowledge-api/VERSION /data-knowledge-api/VERSION
-ENTRYPOINT ["./entrypoint.sh"]
+
+# Promtail + 启动包装（Helm args 仍传给 entrypoint.sh）
+ARG PROMTAIL_VERSION=3.2.1
+RUN mkdir -p /data-knowledge-api/config /data-knowledge-api/logs && \
+    arch="$(uname -m)"; \
+    if [ "$arch" = "x86_64" ]; then PT_ARCH=amd64; elif [ "$arch" = "aarch64" ]; then PT_ARCH=arm64; else echo "unsupported arch: $arch"; exit 1; fi; \
+    curl -fsSL -o /tmp/promtail.zip "https://productivity-console-prod-sh.oss-cn-shanghai.aliyuncs.com/promtail/v${PROMTAIL_VERSION}/promtail-linux-${PT_ARCH}-v${PROMTAIL_VERSION}.zip" && \
+    unzip -q /tmp/promtail.zip -d /tmp/ && \
+    mv "/tmp/promtail-linux-${PT_ARCH}" /usr/local/bin/promtail && \
+    chmod +x /usr/local/bin/promtail && \
+    rm -f /tmp/promtail.zip && rm -rf /tmp/promtail-*
+
+COPY deployment/promtail-config-boe.yaml /data-knowledge-api/config/promtail-config-boe.yaml
+COPY deployment/promtail-config-prod.yaml /data-knowledge-api/config/promtail-config-prod.yaml
+COPY start.sh /data-knowledge-api/start.sh
+RUN chmod +x /data-knowledge-api/start.sh
+
+EXPOSE 9080
+ENTRYPOINT ["/bin/bash", "/data-knowledge-api/start.sh"]

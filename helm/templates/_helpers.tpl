@@ -85,3 +85,17 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/* Legacy template names (ragflow) — alias to data-knowledge-api helpers */}}
+{{- define "ragflow.fullname" -}}
+{{- include "data-knowledge-api.fullname" . -}}
+{{- end }}
+{{- define "ragflow.labels" -}}
+{{- include "data-knowledge-api.labels" . -}}
+{{- end }}
+{{- define "ragflow.selectorLabels" -}}
+{{- include "data-knowledge-api.selectorLabels" . -}}
+{{- end }}
+{{- define "ragflow.imageRepo" -}}
+{{- include "data-knowledge-api.imageRepo" . -}}
+{{- end }}
