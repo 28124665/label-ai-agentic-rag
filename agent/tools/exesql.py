@@ -135,11 +135,12 @@ class ExeSQL(ToolBase, ABC):
                                   port=self._param.port, password=self._param.password)
         elif self._param.db_type == 'mssql':
             conn_str = (
-                    r'DRIVER={ODBC Driver 17 for SQL Server};'
+                    r'DRIVER={ODBC Driver 18 for SQL Server};'
                     r'SERVER=' + self._param.host + ',' + str(self._param.port) + ';'
                     r'DATABASE=' + self._param.database + ';'
                     r'UID=' + self._param.username + ';'
-                    r'PWD=' + self._param.password
+                    r'PWD=' + self._param.password + ';'
+                    r'Encrypt=optional;'
             )
             db = pyodbc.connect(conn_str)
         elif self._param.db_type == 'trino':

@@ -1085,7 +1085,7 @@ def test_test_db_connect_dialect_matrix_unit(monkeypatch):
     monkeypatch.setitem(sys.modules, "pyodbc", pyodbc_mod)
     res = _run_case({**req_base, "db_type": "mssql"})
     assert res["code"] == module.RetCode.SUCCESS
-    assert "DRIVER={ODBC Driver 17 for SQL Server}" in mssql_calls["conn_str"]
+        assert "DRIVER={ODBC Driver 18 for SQL Server}" in mssql_calls["conn_str"]
     assert mssql_calls["sql"] == "SELECT 1"
 
     ibm_calls = {}
