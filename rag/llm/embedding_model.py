@@ -13,6 +13,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
+import functools
 import json
 import os
 import threading
@@ -26,6 +27,7 @@ from ollama import Client
 from openai import OpenAI
 from zhipuai import ZhipuAI
 
+from api.utils.circuit_breaker import CircuitBreakerOpenError, get_breaker
 from common.log_utils import log_exception
 from common.token_utils import num_tokens_from_string, truncate, total_token_count_from_response
 from common import settings
@@ -34,13 +36,57 @@ import base64
 
 
 class Base(ABC):
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        Base._wrap_subclass_methods(cls)
+
+    @staticmethod
+    def _wrap_subclass_methods(cls):
+        """Wrap concrete subclass encode methods with the embedding circuit breaker."""
+        if not issubclass(cls, Base):
+            return
+        Base._wrap_method(cls, "encode")
+        Base._wrap_method(cls, "encode_queries")
+
+    @staticmethod
+    def _wrap_method(cls, method_name: str):
+        method = getattr(cls, method_name, None)
+        if method is None or getattr(method, "_breaker_wrapped", False):
+            return
+        original = method
+
+        @functools.wraps(original)
+        def wrapper(self, *args, **kwargs):
+            # Avoid double-counting when one wrapped method calls another on
+            # the same instance (e.g. LocalAIEmbed.encode_queries -> encode).
+            if getattr(self, "_in_breaker_call", False):
+                return original(self, *args, **kwargs)
+
+            breaker = getattr(self, "_breaker", None) or get_breaker("embedding")
+            if not breaker.allow_request():
+                raise CircuitBreakerOpenError("embedding")
+
+            try:
+                self._in_breaker_call = True
+                result = original(self, *args, **kwargs)
+            except Exception:
+                breaker.record_failure()
+                raise
+            finally:
+                self._in_breaker_call = False
+            breaker.record_success()
+            return result
+
+        wrapper._breaker_wrapped = True
+        setattr(cls, method_name, wrapper)
+
     def __init__(self, key, model_name, **kwargs):
         """
         Constructor for abstract base class.
         Parameters are accepted for interface consistency but are not stored.
         Subclasses should implement their own initialization as needed.
         """
-        pass
+        self._breaker = get_breaker("embedding")
 
     def encode(self, texts: list):
         raise NotImplementedError("Please implement encode method!")

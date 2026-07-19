@@ -17,6 +17,7 @@ import json
 import logging
 import re
 import math
+import time
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 
@@ -28,6 +29,9 @@ from common.float_utils import get_float
 from common.constants import PAGERANK_FLD, TAG_FLD, MessageTypeEnum
 from common import settings
 
+from api.utils.circuit_breaker import CircuitBreakerOpenError
+from api.utils import metrics
+from api.utils.structured_logger import log_retrieval
 from common.misc_utils import thread_pool_exec
 
 def index_name(uid): return f"ragflow_{uid}"
@@ -61,7 +65,11 @@ class Dealer:
         group_docs: list[list] | None = None
 
     async def get_vector(self, txt, emb_mdl, topk=10, similarity=0.1):
-        qv, _ = await thread_pool_exec(emb_mdl.encode_queries, txt)
+        try:
+            qv, _ = await thread_pool_exec(emb_mdl.encode_queries, txt)
+        except CircuitBreakerOpenError:
+            logging.warning("[Dealer] embedding service degraded, falling back to keyword-only retrieval")
+            return None
         shape = np.array(qv).shape
         if len(shape) > 1:
             raise Exception(
@@ -131,12 +139,16 @@ class Dealer:
                 logging.debug("Dealer.search TOTAL: {}".format(total))
             else:
                 matchDense = await self.get_vector(qst, emb_mdl, topk, req.get("similarity", 0.1))
-                q_vec = matchDense.embedding_data
-                if not settings.DOC_ENGINE_INFINITY:
-                    src.append(f"q_{len(q_vec)}_vec")
+                if matchDense is None:
+                    # Embedding service is degraded; fall back to keyword-only retrieval.
+                    matchExprs = [matchText]
+                else:
+                    q_vec = matchDense.embedding_data
+                    if not settings.DOC_ENGINE_INFINITY:
+                        src.append(f"q_{len(q_vec)}_vec")
 
-                fusionExpr = FusionExpr("weighted_sum", topk, {"weights": "0.05,0.95"})
-                matchExprs = [matchText, matchDense, fusionExpr]
+                    fusionExpr = FusionExpr("weighted_sum", topk, {"weights": "0.05,0.95"})
+                    matchExprs = [matchText, matchDense, fusionExpr]
 
                 res = await thread_pool_exec(self.dataStore.search, src, highlightFields, filters, matchExprs, orderBy, offset, limit,
                                             idx_names, kb_ids, rank_feature=rank_feature)
@@ -144,7 +156,7 @@ class Dealer:
                 logging.debug("Dealer.search TOTAL: {}".format(total))
 
                 # If result is empty, try again with lower min_match
-                if total == 0:
+                if total == 0 and matchDense is not None:
                     if filters.get("doc_id"):
                         res = await thread_pool_exec(self.dataStore.search, src, [], filters, [], orderBy, offset, limit, idx_names, kb_ids)
                         total = self.dataStore.get_total(res)
@@ -389,8 +401,10 @@ class Dealer:
             highlight=False,
             rank_feature: dict | None = {PAGERANK_FLD: 10},
     ):
+        start_ts = time.perf_counter()
         ranks = {"total": 0, "chunks": [], "doc_aggs": {}}
         if not question:
+            self._record_retrieval_metrics(ranks, kb_ids, start_ts, "skipped")
             return ranks
 
         # Ensure RERANK_LIMIT is multiple of page_size
@@ -522,7 +536,31 @@ class Dealer:
         else:
             ranks["doc_aggs"] = []
 
+        self._record_retrieval_metrics(ranks, kb_ids, start_ts, "success")
         return ranks
+
+    def _record_retrieval_metrics(
+        self,
+        ranks: dict,
+        kb_ids: list[str],
+        start_ts: float,
+        status: str,
+    ) -> None:
+        """Record retrieval latency and structured log."""
+        try:
+            duration_ms = (time.perf_counter() - start_ts) * 1000.0
+            kb_id = str(kb_ids[0]) if kb_ids else "unknown"
+            metrics.rag_retrieval_latency_seconds.labels(kb_id=kb_id).observe(duration_ms / 1000.0)
+            log_retrieval(
+                trace_id="",
+                span_id="",
+                duration_ms=duration_ms,
+                status=status,
+                result_count=ranks.get("total", 0),
+                kb_id=kb_id,
+            )
+        except Exception as e:
+            logging.warning("[Dealer] Failed to record retrieval metrics: %s", e)
 
     def sql_retrieval(self, sql, fetch_size=128, format="json"):
         tbl = self.dataStore.sql(sql, fetch_size, format)

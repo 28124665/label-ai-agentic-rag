@@ -19,6 +19,7 @@ import inspect
 import binascii
 import json
 import logging
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -28,15 +29,24 @@ from typing import Any, Union, Tuple
 
 from agent.component import component_class
 from agent.component.base import ComponentBase
+from agent.component.state_fields import (
+    CHECKPOINT_ENABLED_NODES,
+    STATE_CONFIG_DEFAULTS,
+    extract_canvas_state,
+    upgrade_canvas_globals,
+)
 from api.db.services.file_service import FileService
 from api.db.services.llm_service import LLMBundle
 from api.db.services.task_service import has_canceled
 from api.db.joint_services.tenant_model_service import get_tenant_default_model_by_type
+from api.utils.state_crypto import secure_serialize_persistent, secure_serialize_runtime
 from common.constants import LLMType
 from common.misc_utils import get_uuid, hash_str2int
 from common.exceptions import TaskCanceledException
 from rag.prompts.generator import chunks_format
 from rag.utils.redis_conn import REDIS_CONN
+from api.utils import metrics
+from api.utils.structured_logger import log_node_execution, log_workflow, log_error
 
 class Graph:
     """
@@ -292,6 +302,19 @@ class Canvas(Graph):
         self.variables = {}
         super().__init__(dsl, tenant_id, task_id, custom_header=custom_header)
         self._id = canvas_id
+        # State lifecycle configuration (P2-FR-04)
+        self._state_encryption_enabled = str(
+            os.environ.get("STATE_ENCRYPTION_ENABLED", str(STATE_CONFIG_DEFAULTS["state_encryption_enabled"]))
+        ).lower() == "true"
+        self._state_max_size_mb = float(
+            os.environ.get("STATE_MAX_SIZE_MB", STATE_CONFIG_DEFAULTS["state_max_size_mb"])
+        )
+        self._state_ttl_seconds = int(
+            os.environ.get("STATE_TTL_SECONDS", STATE_CONFIG_DEFAULTS["state_ttl_seconds"])
+        )
+        self._checkpoint_ttl_seconds = int(
+            os.environ.get("CHECKPOINT_TTL_DAYS", STATE_CONFIG_DEFAULTS["checkpoint_ttl_days"])
+        ) * 24 * 3600
 
     def load(self):
         super().load()
@@ -312,6 +335,9 @@ class Canvas(Graph):
             self.variables = self.dsl["variables"]
         else:
             self.variables = {}
+
+        # Ensure standard Agent state fields are present and up to date.
+        self.globals = upgrade_canvas_globals(self.globals)
 
         self.retrieval = self.dsl["retrieval"]
         self.memory = self.dsl.get("memory", [])
@@ -424,6 +450,10 @@ class Canvas(Graph):
             raise TaskCanceledException(msg)
 
         yield decorate("workflow_started", {"inputs": kwargs.get("inputs")})
+        try:
+            await self._persist_runtime_state("begin")
+        except Exception as e:
+            logging.warning("Failed to persist initial runtime state: %s", e)
         self.retrieval.append({"chunks": {}, "doc_aggs": {}})
 
         async def _run_batch(f, t):
@@ -491,9 +521,11 @@ class Canvas(Graph):
         idx = len(self.path) - 1
         partials = []
         tts_mdl = None
+        node_start_times: dict[str, float] = {}
         while idx < len(self.path):
             to = len(self.path)
             for i in range(idx, to):
+                node_start_times[self.path[i]] = time.perf_counter()
                 yield decorate("node_started", {
                     "inputs": None, "created_at": int(time.time()),
                     "component_id": self.path[i],
@@ -590,6 +622,36 @@ class Canvas(Graph):
                     else:
                         yield _node_finished(cpn_obj)
 
+                # Observability: record component execution timing and status.
+                try:
+                    node_name = cpn_obj.component_name.lower()
+                    start_ts = node_start_times.pop(cpn_obj._id, None)
+                    duration_ms = (time.perf_counter() - start_ts) * 1000.0 if start_ts else 0.0
+                    status = "error" if cpn_obj.error() else "success"
+                    log_node_execution(
+                        trace_id=self.task_id,
+                        span_id=cpn_obj._id,
+                        node_name=node_name,
+                        duration_ms=duration_ms,
+                        status=status,
+                        metadata={"component_name": self.get_component_name(cpn_obj._id)},
+                    )
+                    if status == "error":
+                        log_error(self.task_id, cpn_obj._id, node_name, Exception(cpn_obj.error()))
+                except Exception as obs_err:
+                    logging.warning("Failed to record node observability: %s", obs_err)
+
+                node_name = cpn_obj.component_name.lower()
+                try:
+                    await self._persist_runtime_state(node_name)
+                except Exception as e:
+                    logging.warning("Failed to persist runtime state after %s: %s", node_name, e)
+                if node_name in CHECKPOINT_ENABLED_NODES:
+                    try:
+                        await self._persist_checkpoint(node_name)
+                    except Exception as e:
+                        logging.warning("Failed to persist checkpoint after %s: %s", node_name, e)
+
                 def _append_path(cpn_id):
                     nonlocal other_branch
                     if other_branch:
@@ -659,6 +721,49 @@ class Canvas(Graph):
                            "elapsed_time": time.perf_counter() - st,
                            "created_at": st,
                        })
+
+        # Observability: workflow-level metrics.
+        try:
+            e2e_seconds = time.perf_counter() - st
+            kb_id = self._extract_kb_id()
+            metrics.rag_e2e_latency_seconds.labels(kb_id=kb_id).observe(e2e_seconds)
+            workflow_status = "success"
+            if self.error:
+                workflow_status = "canceled" if "Task has been canceled" in self.error else "error"
+            log_workflow(
+                trace_id=self.task_id,
+                span_id=self.message_id,
+                duration_ms=e2e_seconds * 1000.0,
+                status=workflow_status,
+                metadata={"kb_id": kb_id},
+            )
+            if workflow_status == "success":
+                final_output = self.get_component_obj(self.path[-1]).output()
+                final_text = str(final_output.get("content", final_output) if isinstance(final_output, dict) else final_output)
+                has_citation = self._has_reference() and "[ID:" in final_text
+                metrics.record_answer_with_citation(kb_id, has_citation)
+        except Exception as obs_err:
+            logging.warning("Failed to record workflow observability: %s", obs_err)
+
+        self._clear_runtime_state()
+
+    def _extract_kb_id(self) -> str:
+        """Extract a representative kb_id from the latest retrieval reference."""
+        try:
+            ref = self.get_reference()
+            if isinstance(ref, dict):
+                chunks = ref.get("chunks") or {}
+                if isinstance(chunks, dict) and chunks:
+                    for chunk in chunks.values():
+                        if isinstance(chunk, dict) and chunk.get("kb_id"):
+                            return str(chunk["kb_id"])
+                elif isinstance(chunks, list) and chunks:
+                    for chunk in chunks:
+                        if isinstance(chunk, dict) and chunk.get("kb_id"):
+                            return str(chunk["kb_id"])
+        except Exception:
+            pass
+        return "unknown"
 
     def is_reff(self, exp: str) -> bool:
         exp = exp.strip("{").strip("}")
@@ -844,3 +949,63 @@ class Canvas(Graph):
 
     def get_component_thoughts(self, cpn_id) -> str:
         return self.components.get(cpn_id)["obj"].thoughts()
+
+    # -----------------------------------------------------------------------
+    # Standard Agent state persistence (P2-FR-04)
+    # -----------------------------------------------------------------------
+
+    def _runtime_state_key(self) -> str:
+        return f"{self.task_id}-state"
+
+    def _build_state_snapshot(self, node_name: str = "") -> dict:
+        """Build a state snapshot that can be persisted or replayed."""
+        state = extract_canvas_state(self)
+        state.update({
+            "_task_id": self.task_id,
+            "_message_id": getattr(self, "message_id", ""),
+            "_canvas_id": getattr(self, "_id", ""),
+            "_path": self.path[:],
+            "_node_name": node_name,
+            "_timestamp": time.time(),
+        })
+        return state
+
+    async def _persist_runtime_state(self, node_name: str = "") -> None:
+        """Persist the current runtime state to Redis as JSON."""
+        try:
+            payload = secure_serialize_runtime(
+                self._build_state_snapshot(node_name),
+                encrypt=self._state_encryption_enabled,
+                max_size_mb=self._state_max_size_mb,
+            )
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                partial(REDIS_CONN.set, self._runtime_state_key(), payload, self._state_ttl_seconds),
+            )
+        except Exception as e:
+            logging.warning("Failed to persist runtime state for task %s: %s", self.task_id, e)
+
+    async def _persist_checkpoint(self, node_name: str) -> None:
+        """Persist a checkpoint snapshot using MessagePack+gzip."""
+        try:
+            payload = secure_serialize_persistent(
+                self._build_state_snapshot(node_name),
+                encrypt=self._state_encryption_enabled,
+                max_size_mb=self._state_max_size_mb,
+            )
+            key = f"{self.task_id}-checkpoint:{node_name}:{int(time.time() * 1000)}"
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                partial(REDIS_CONN.set, key, payload, self._checkpoint_ttl_seconds),
+            )
+        except Exception as e:
+            logging.warning("Failed to persist checkpoint for task %s: %s", self.task_id, e)
+
+    def _clear_runtime_state(self) -> None:
+        """Clean up the transient runtime state key."""
+        try:
+            REDIS_CONN.delete(self._runtime_state_key())
+        except Exception as e:
+            logging.warning("Failed to clear runtime state for task %s: %s", self.task_id, e)

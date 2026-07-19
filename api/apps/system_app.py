@@ -34,8 +34,9 @@ from common.time_utils import current_timestamp, datetime_format
 from timeit import default_timer as timer
 
 from rag.utils.redis_conn import REDIS_CONN
-from quart import jsonify
+from quart import jsonify, Response
 from api.utils.health_utils import run_health_checks, get_oceanbase_status
+from api.utils import metrics
 from common import settings
 
 
@@ -180,6 +181,25 @@ def healthz():
 @manager.route("/ping", methods=["GET"])  # noqa: F821
 async def ping():
     return "pong", 200
+
+
+@manager.route("/metrics", methods=["GET"])  # noqa: F821
+def metrics_endpoint():
+    """
+    Prometheus metrics endpoint.
+    ---
+    tags:
+      - System
+    responses:
+      200:
+        description: Prometheus exposition format metrics.
+    """
+    try:
+        data = metrics.generate_latest()
+        return Response(data, mimetype=metrics.CONTENT_TYPE_LATEST)
+    except Exception as e:
+        logging.exception("Failed to generate metrics")
+        return jsonify({"error": str(e)}), 500
 
 
 @manager.route("/oceanbase/status", methods=["GET"])  # noqa: F821

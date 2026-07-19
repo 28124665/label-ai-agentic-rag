@@ -1,0 +1,31 @@
+{
+  "proper_nouns": [
+    "富士康",
+    "鴻海",
+    "鴻海精密",
+    "Foxconn",
+    "Hon Hai",
+    "台积电",
+    "台積電",
+    "TSMC",
+    "夏普",
+    "Sharp",
+    "iPhone",
+    "iPad",
+    "MacBook",
+    "Apple",
+    "SAP",
+    "ERP",
+    "MES",
+    "CRM",
+    "PLM",
+    "SCM",
+    "AI",
+    "LLM",
+    "RAG",
+    "BOM",
+    "OEM",
+    "ODM",
+    "EMS"
+  ]
+}

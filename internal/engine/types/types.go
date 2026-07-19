@@ -49,6 +49,8 @@ type SearchRequest struct {
 
 // SearchResponse unified search response for all engines
 type SearchResponse struct {
-	Chunks []map[string]interface{} // Search results
-	Total  int64                    // Total number of matches
+	Chunks          []map[string]interface{} // Search results
+	Total           int64                    // Total number of matches
+	Degraded        bool                     // Whether the response is a degraded result
+	DegradedReason  string                   // Reason for degradation, e.g. es_unavailable
 }

@@ -36,5 +36,8 @@
 	"removed_kwd": {"type": "varchar", "default": "", "analyzer": "whitespace-#"},
 	"doc_type_kwd": {"type": "varchar", "default": "", "analyzer": "whitespace-#"},
 	"toc_kwd": {"type": "varchar", "default": "", "analyzer": "whitespace-#"},
-	"raptor_kwd": {"type": "varchar", "default": "", "analyzer": "whitespace-#"}
+	"raptor_kwd": {"type": "varchar", "default": "", "analyzer": "whitespace-#"},
+	"original_text": {"type": "varchar", "default": "", "comment": "chunk original text (preserves original language)"},
+	"original_lang": {"type": "varchar", "default": "", "index_type": {"type": "secondary", "cardinality": "low"}, "comment": "language tag: zh-simplified/zh-traditional/en"},
+	"search_text": {"type": "varchar", "default": "", "analyzer": ["rag-coarse", "rag-fine"], "comment": "search text (simplified for Chinese, original for English)"}
 }

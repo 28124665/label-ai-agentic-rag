@@ -67,6 +67,7 @@ dependencies = [
     "ollama>=0.5.0",
     "onnxruntime==1.23.2; sys_platform == 'darwin' or platform_machine != 'x86_64'",
     "onnxruntime-gpu==1.23.2; sys_platform != 'darwin' and platform_machine == 'x86_64'",
+    "opencc-python-reimplemented>=0.1.7",
     "opencv-python==4.10.0.84",
     "opencv-python-headless==4.10.0.84",
     "opendal>=0.45.0,<0.46.0",

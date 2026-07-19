@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"ragflow/internal/engine/types"
+	"ragflow/internal/utility"
 )
 
 // SearchRequest Infinity search request (legacy, kept for backward compatibility)
@@ -83,6 +84,27 @@ func (e *infinityEngine) Search(ctx context.Context, req interface{}) (interface
 
 // searchUnified handles the unified engine.SearchRequest
 func (e *infinityEngine) searchUnified(ctx context.Context, req *types.SearchRequest) (*types.SearchResponse, error) {
+	breaker := utility.GetBreaker("infinity")
+	if !breaker.AllowRequest() {
+		return &types.SearchResponse{
+			Chunks:         []map[string]interface{}{},
+			Total:          0,
+			Degraded:       true,
+			DegradedReason: "infinity_unavailable",
+		}, nil
+	}
+
+	resp, err := e.doSearchUnified(ctx, req)
+	if err != nil {
+		breaker.RecordFailure()
+		return nil, err
+	}
+	breaker.RecordSuccess()
+	return resp, nil
+}
+
+// doSearchUnified performs the actual Infinity search.
+func (e *infinityEngine) doSearchUnified(ctx context.Context, req *types.SearchRequest) (*types.SearchResponse, error) {
 	if len(req.IndexNames) == 0 {
 		return nil, fmt.Errorf("index names cannot be empty")
 	}

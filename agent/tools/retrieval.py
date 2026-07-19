@@ -28,6 +28,8 @@ from api.db.services.llm_service import LLMBundle
 from api.db.services.memory_service import MemoryService
 from api.db.joint_services import memory_message_service
 from api.db.joint_services.tenant_model_service import get_model_config_by_type_and_name, get_tenant_default_model_by_type
+from api.utils.multilingual_reranker import rerank as multilingual_rerank
+from api.utils.query_preprocessor import preprocess_query
 from common import settings
 from common.connection_utils import timeout
 from rag.app.tag import label_question
@@ -40,7 +42,7 @@ class RetrievalParam(ToolParamBase):
     """
 
     def __init__(self):
-        self.meta:ToolMeta = {
+        self.meta: ToolMeta = {
             "name": "search_my_dateset",
             "description": "This tool can be utilized for relevant content searching in the datasets.",
             "parameters": {
@@ -48,9 +50,9 @@ class RetrievalParam(ToolParamBase):
                     "type": "string",
                     "description": "The keywords to search the dataset. The keywords should be the most important words/terms(includes synonyms) from the original request.",
                     "default": "",
-                    "required": True
+                    "required": True,
                 }
-            }
+            },
         }
         super().__init__()
         self.function_name = "search_my_dateset"
@@ -67,7 +69,7 @@ class RetrievalParam(ToolParamBase):
         self.use_kg = False
         self.cross_languages = []
         self.toc_enhance = False
-        self.meta_data_filter={}
+        self.meta_data_filter = {}
 
     def check(self):
         self.check_decimal_float(self.similarity_threshold, "[Retrieval] Similarity threshold")
@@ -75,12 +77,8 @@ class RetrievalParam(ToolParamBase):
         self.check_positive_number(self.top_n, "[Retrieval] Top N")
 
     def get_input_form(self) -> dict[str, dict]:
-        return {
-            "query": {
-                "name": "Query",
-                "type": "line"
-            }
-        }
+        return {"query": {"name": "Query", "type": "line"}}
+
 
 class Retrieval(ToolBase, ABC):
     component_name = "Retrieval"
@@ -95,8 +93,7 @@ class Retrieval(ToolBase, ABC):
             # if kb_nm is a list
             kb_nm_list = kb_nm if isinstance(kb_nm, list) else [kb_nm]
             for nm_or_id in kb_nm_list:
-                e, kb = KnowledgebaseService.get_by_name(nm_or_id,
-                                                         self._canvas._tenant_id)
+                e, kb = KnowledgebaseService.get_by_name(nm_or_id, self._canvas._tenant_id)
                 if not e:
                     e, kb = KnowledgebaseService.get_by_id(nm_or_id)
                     if not e:
@@ -138,7 +135,7 @@ class Retrieval(ToolBase, ABC):
                 last = 0
 
                 for m in pat.finditer(s):
-                    out_parts.append(s[last:m.start()])
+                    out_parts.append(s[last : m.start()])
                     key = m.group(1)
                     v = self._canvas.get_variable_value(key)
                     if v is None:
@@ -178,10 +175,23 @@ class Retrieval(ToolBase, ABC):
         if self._param.cross_languages:
             query = await cross_languages(kbs[0].tenant_id, None, query, self._param.cross_languages)
 
+        # 多语言查询预处理：获取查询语言与繁转简后的查询文本
+        # query_simplified 用于检索/Rerank（与文档 search_text 同语义空间）
+        # 原 query 仍保留用于 label_question、memory 等其他用途
+        # 默认值用于 kbs 为空时的兜底（此时 chunks 为空，rerank 不会执行）
+        query_simplified = query
+        self._last_query_lang = None
+
         if kbs:
             query = re.sub(r"^user[:：\s]*", "", query, flags=re.IGNORECASE)
+            # 调用 preprocess_query 获取 query_lang 与 query_simplified（繁转简后）
+            # 用 query_simplified 替代原始 query 作为 retrieval 的输入，
+            # 保证查询与文档 search_text 处于同一简体语义空间，提升向量召回率
+            preprocessed = preprocess_query(query)
+            query_simplified = preprocessed["query_simplified"]
+            self._last_query_lang = preprocessed["query_lang"]
             kbinfos = await settings.retriever.retrieval(
-                query,
+                query_simplified,
                 embd_mdl,
                 [kb.tenant_id for kb in kbs],
                 filtered_kb_ids,
@@ -201,22 +211,16 @@ class Retrieval(ToolBase, ABC):
                 tenant_id = self._canvas._tenant_id
                 chat_model_config = get_tenant_default_model_by_type(tenant_id, LLMType.CHAT)
                 chat_mdl = LLMBundle(tenant_id, chat_model_config)
-                cks = await settings.retriever.retrieval_by_toc(query, kbinfos["chunks"], [kb.tenant_id for kb in kbs],
-                                                          chat_mdl, self._param.top_n)
+                cks = await settings.retriever.retrieval_by_toc(query, kbinfos["chunks"], [kb.tenant_id for kb in kbs], chat_mdl, self._param.top_n)
                 if self.check_if_canceled("Retrieval processing"):
                     return
                 if cks:
                     kbinfos["chunks"] = cks
-            kbinfos["chunks"] = settings.retriever.retrieval_by_children(kbinfos["chunks"],
-                                                                         [kb.tenant_id for kb in kbs])
+            kbinfos["chunks"] = settings.retriever.retrieval_by_children(kbinfos["chunks"], [kb.tenant_id for kb in kbs])
             if self._param.use_kg:
                 tenant_id = self._canvas.get_tenant_id()
                 chat_model_config = get_tenant_default_model_by_type(tenant_id, LLMType.CHAT)
-                ck = await settings.kg_retriever.retrieval(query,
-                                                     [kb.tenant_id for kb in kbs],
-                                                     kb_ids,
-                                                     embd_mdl,
-                                                     LLMBundle(tenant_id, chat_model_config))
+                ck = await settings.kg_retriever.retrieval(query, [kb.tenant_id for kb in kbs], kb_ids, embd_mdl, LLMBundle(tenant_id, chat_model_config))
                 if self.check_if_canceled("Retrieval processing"):
                     return
                 if ck["content_with_weight"]:
@@ -226,14 +230,25 @@ class Retrieval(ToolBase, ABC):
 
         if self._param.use_kg and kbs:
             chat_model_config = get_tenant_default_model_by_type(kbs[0].tenant_id, LLMType.CHAT)
-            ck = await settings.kg_retriever.retrieval(query, [kb.tenant_id for kb in kbs], filtered_kb_ids, embd_mdl,
-                                                 LLMBundle(kbs[0].tenant_id, chat_model_config))
+            ck = await settings.kg_retriever.retrieval(query, [kb.tenant_id for kb in kbs], filtered_kb_ids, embd_mdl, LLMBundle(kbs[0].tenant_id, chat_model_config))
             if self.check_if_canceled("Retrieval processing"):
                 return
             if ck["content_with_weight"]:
                 ck["content"] = ck["content_with_weight"]
                 del ck["content_with_weight"]
                 kbinfos["chunks"].insert(0, ck)
+
+        # 多语言 Rerank：基于 search_text 与 query_simplified 在同一简体语义空间内重排
+        # 仅当 rerank_mdl 不为 None 且 chunks 非空时执行；否则跳过（保持原顺序）
+        # rerank 内部通过 extract_search_text 提取每个 chunk 的 search_text 字段，
+        # 与 query_simplified 配对计算语义相关性分数，按分数降序截取 top_n 条
+        if rerank_mdl is not None and kbinfos["chunks"]:
+            kbinfos["chunks"] = multilingual_rerank(
+                query_simplified,
+                kbinfos["chunks"],
+                top_k=self._param.top_n,
+                rerank_model=rerank_mdl,
+            )
 
         for ck in kbinfos["chunks"]:
             if "vector" in ck:
@@ -270,12 +285,10 @@ class Retrieval(ToolBase, ABC):
         vars = {k: o["value"] for k, o in vars.items()}
         query = self.string_format(query_text, vars)
         # query message
-        message_list = memory_message_service.query_message({"memory_id": memory_ids}, {
-            "query": query,
-            "similarity_threshold": self._param.similarity_threshold,
-            "keywords_similarity_weight": self._param.keywords_similarity_weight,
-            "top_n": self._param.top_n
-        })
+        message_list = memory_message_service.query_message(
+            {"memory_id": memory_ids},
+            {"query": query, "similarity_threshold": self._param.similarity_threshold, "keywords_similarity_weight": self._param.keywords_similarity_weight, "top_n": self._param.top_n},
+        )
         if not message_list:
             self.set_output("formalized_content", self._param.empty_response)
             return ""

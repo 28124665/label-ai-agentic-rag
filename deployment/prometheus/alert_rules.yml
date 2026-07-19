@@ -1,0 +1,105 @@
+groups:
+  - name: ragflow_observability
+    interval: 30s
+    rules:
+      # -------------------------------------------------------------------
+      # Quality alerts
+      # -------------------------------------------------------------------
+      - alert: RAGFlowLowRetrievalHitRate
+        expr: avg by (kb_id) (rag_retrieval_hit_rate) < 0.6
+        for: 5m
+        labels:
+          severity: warning
+          team: rag
+        annotations:
+          summary: "RAG retrieval hit rate is low for kb {{ $labels.kb_id }}"
+          description: "Retrieval hit rate for kb {{ $labels.kb_id }} has been below 0.6 for more than 5 minutes."
+
+      - alert: RAGFlowLowFaithfulnessScore
+        expr: avg by (kb_id) (rag_faithfulness_score) < 0.6
+        for: 5m
+        labels:
+          severity: critical
+          team: rag
+        annotations:
+          summary: "Hallucination detector faithfulness score is low for kb {{ $labels.kb_id }}"
+          description: "Average faithfulness score for kb {{ $labels.kb_id }} has been below 0.6 for more than 5 minutes."
+
+      # -------------------------------------------------------------------
+      # Performance alerts
+      # -------------------------------------------------------------------
+      - alert: RAGFlowHighE2ELatency
+        expr: histogram_quantile(0.95, sum by (le, kb_id) (rate(rag_e2e_latency_seconds_bucket[5m]))) > 30
+        for: 5m
+        labels:
+          severity: warning
+          team: rag
+        annotations:
+          summary: "RAG end-to-end latency P95 is high for kb {{ $labels.kb_id }}"
+          description: "E2E latency P95 for kb {{ $labels.kb_id }} has been above 30s for more than 5 minutes."
+
+      - alert: RAGFlowHighRetrievalLatency
+        expr: histogram_quantile(0.95, sum by (le, kb_id) (rate(rag_retrieval_latency_seconds_bucket[5m]))) > 10
+        for: 5m
+        labels:
+          severity: warning
+          team: rag
+        annotations:
+          summary: "Retrieval latency P95 is high for kb {{ $labels.kb_id }}"
+          description: "Retrieval latency P95 for kb {{ $labels.kb_id }} has been above 10s for more than 5 minutes."
+
+      - alert: RAGFlowHighGenerateLatency
+        expr: histogram_quantile(0.95, sum by (le, model) (rate(rag_generate_latency_seconds_bucket[5m]))) > 60
+        for: 5m
+        labels:
+          severity: warning
+          team: rag
+        annotations:
+          summary: "LLM generation latency P95 is high for model {{ $labels.model }}"
+          description: "Generate latency P95 for model {{ $labels.model }} has been above 60s for more than 5 minutes."
+
+      # -------------------------------------------------------------------
+      # Reliability alerts
+      # -------------------------------------------------------------------
+      - alert: RAGFlowHigh5xxRate
+        expr: rag_http_5xx_rate > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "RAG HTTP 5xx rate is high"
+          description: "HTTP 5xx rate has been above 5% for more than 2 minutes."
+
+      - alert: RAGFlowHighTimeoutRate
+        expr: rag_timeout_rate > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "RAG request timeout rate is high"
+          description: "Timeout rate has been above 5% for more than 2 minutes."
+
+      - alert: RAGFlowDegradationSpike
+        expr: sum by (reason) (increase(rag_degradation_count[5m])) > 10
+        for: 2m
+        labels:
+          severity: warning
+          team: rag
+        annotations:
+          summary: "RAG degradation spike for reason {{ $labels.reason }}"
+          description: "Degradation count for reason {{ $labels.reason }} increased by more than 10 in the last 5 minutes."
+
+      # -------------------------------------------------------------------
+      # Cost alerts
+      # -------------------------------------------------------------------
+      - alert: RAGFlowHighLLMCost
+        expr: sum by (model) (increase(rag_llm_cost_total[1h])) > 5
+        for: 0m
+        labels:
+          severity: warning
+          team: rag
+        annotations:
+          summary: "High LLM cost for model {{ $labels.model }}"
+          description: "LLM cost for model {{ $labels.model }} exceeded $5 in the last hour."

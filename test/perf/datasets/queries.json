@@ -1,0 +1,505 @@
+{
+  "count": 100,
+  "queries": [
+    {
+      "id": "q_000",
+      "query": "配送时效的默认端口是多少？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_050",
+      "query": "MySQL出现Docker错误如何解决？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_068",
+      "query": "Docker和Kafka有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_083",
+      "query": "请对比Kafka、Elasticsearch、Python在一致性、可用性和性能上的差异。",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_081",
+      "query": "在Kubernetes和MySQL的混合部署中，如何优化Docker的延迟和吞吐量？",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_020",
+      "query": "积分规则是什么？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_062",
+      "query": "Python的常用参数有哪些，如何调优？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_080",
+      "query": "MySQL在Docker场景下出现OpenAI问题，如何定位根因并优化？",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_019",
+      "query": "怎么查看修改地址状态？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_040",
+      "query": "MySQL的常用参数有哪些，如何调优？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_012",
+      "query": "如何重置RAGFlow？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_072",
+      "query": "如何在Python中配置LangChain？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_099",
+      "query": "请对比Kubernetes、LangChain、Redis在一致性、可用性和性能上的差异。",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_017",
+      "query": "如何重置Redis？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_090",
+      "query": "设计一个基于Docker和MySQL的方案，要求支持Elasticsearch的高并发访问。",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_086",
+      "query": "设计一个基于MySQL和Prometheus的方案，要求支持Kafka的高并发访问。",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_031",
+      "query": "如何重置MinIO？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_067",
+      "query": "如何在Kubernetes中配置RabbitMQ？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_015",
+      "query": "退款政策的默认端口是多少？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_008",
+      "query": "Kubernetes的默认端口是多少？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_064",
+      "query": "Grafana和React如何集成使用？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_085",
+      "query": "在OpenAI和LangChain的混合部署中，如何优化Redis的延迟和吞吐量？",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_036",
+      "query": "如何重置RabbitMQ？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_089",
+      "query": "如何在Kubernetes集群中实现Kafka的自动扩缩容，并保证Prometheus的稳定性？",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_061",
+      "query": "MySQL和OpenAI有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_041",
+      "query": "如何在MinIO中配置Docker？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_073",
+      "query": "MinIO和Redis如何集成使用？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_035",
+      "query": "怎么查看React状态？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_016",
+      "query": "怎么查看优惠券状态？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_076",
+      "query": "Grafana出现Grafana错误如何解决？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_057",
+      "query": "RabbitMQ的常用参数有哪些，如何调优？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_024",
+      "query": "怎么查看MinIO状态？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_006",
+      "query": "会员权益是什么？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_084",
+      "query": "在OpenAI和Elasticsearch的混合部署中，如何优化LangChain的延迟和吞吐量？",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_077",
+      "query": "Grafana和MySQL有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_087",
+      "query": "如何在OpenAI集群中实现Kafka的自动扩缩容，并保证Elasticsearch的稳定性？",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_078",
+      "query": "如何在LangChain中配置Python？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_091",
+      "query": "如何在Docker集群中实现Grafana的自动扩缩容，并保证OpenAI的稳定性？",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_029",
+      "query": "怎么查看RabbitMQ状态？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_088",
+      "query": "请对比RabbitMQ、Elasticsearch、Python在一致性、可用性和性能上的差异。",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_070",
+      "query": "RAGFlow和Grafana有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_009",
+      "query": "如何重置账户密码？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_069",
+      "query": "LangChain出现Grafana错误如何解决？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_065",
+      "query": "如何在Grafana中配置OpenAI？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_018",
+      "query": "怎么查看RabbitMQ状态？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_044",
+      "query": "Python出现OpenAI错误如何解决？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_030",
+      "query": "账户密码支持哪些格式？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_095",
+      "query": "如何在Kafka集群中实现Kafka的自动扩缩容，并保证Prometheus的稳定性？",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_022",
+      "query": "售后服务是什么？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_021",
+      "query": "Kubernetes支持哪些格式？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_045",
+      "query": "OpenAI出现OpenAI错误如何解决？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_046",
+      "query": "MySQL和RabbitMQ有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_079",
+      "query": "Docker和Python有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_082",
+      "query": "设计一个基于LangChain和Python的方案，要求支持Kubernetes的高并发访问。",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_055",
+      "query": "Python和LangChain有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_066",
+      "query": "Redis和Redis有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_074",
+      "query": "OpenAI出现Elasticsearch错误如何解决？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_059",
+      "query": "LangChain的常用参数有哪些，如何调优？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_003",
+      "query": "Python的默认端口是多少？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_097",
+      "query": "如何在Docker集群中实现React的自动扩缩容，并保证Elasticsearch的稳定性？",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_028",
+      "query": "怎么查看Prometheus状态？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_039",
+      "query": "如何重置积分规则？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_075",
+      "query": "MinIO的常用参数有哪些，如何调优？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_052",
+      "query": "Kubernetes和Kafka有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_010",
+      "query": "怎么查看Docker状态？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_032",
+      "query": "怎么查看退款政策状态？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_098",
+      "query": "设计一个基于Kubernetes和Python的方案，要求支持Prometheus的高并发访问。",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_034",
+      "query": "如何重置积分规则？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_058",
+      "query": "Prometheus和Kafka有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_092",
+      "query": "在RAGFlow和RabbitMQ的混合部署中，如何优化Elasticsearch的延迟和吞吐量？",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_049",
+      "query": "Docker和Redis有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_048",
+      "query": "MinIO和MySQL有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_047",
+      "query": "Grafana的常用参数有哪些，如何调优？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_007",
+      "query": "怎么查看Prometheus状态？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_004",
+      "query": "发票申请是什么？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_033",
+      "query": "Elasticsearch支持哪些格式？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_056",
+      "query": "Redis的常用参数有哪些，如何调优？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_093",
+      "query": "设计一个基于Elasticsearch和React的方案，要求支持RabbitMQ的高并发访问。",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_060",
+      "query": "Elasticsearch和LangChain有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_002",
+      "query": "OpenAI是什么？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_013",
+      "query": "Kubernetes的默认端口是多少？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_025",
+      "query": "RAGFlow支持哪些格式？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_051",
+      "query": "Python出现Prometheus错误如何解决？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_054",
+      "query": "Elasticsearch和RabbitMQ有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_037",
+      "query": "配送时效支持哪些格式？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_038",
+      "query": "MySQL是什么？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_027",
+      "query": "发票申请的默认端口是多少？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_071",
+      "query": "如何在MinIO中配置Grafana？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_023",
+      "query": "优惠券支持哪些格式？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_063",
+      "query": "Prometheus的常用参数有哪些，如何调优？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_001",
+      "query": "LangChain是什么？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_014",
+      "query": "Prometheus支持哪些格式？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_042",
+      "query": "React出现Docker错误如何解决？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_026",
+      "query": "RabbitMQ的默认端口是多少？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_094",
+      "query": "请对比RabbitMQ、Grafana、RabbitMQ在一致性、可用性和性能上的差异。",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_043",
+      "query": "如何在Kubernetes中配置Redis？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_096",
+      "query": "在Redis和RabbitMQ的混合部署中，如何优化Prometheus的延迟和吞吐量？",
+      "complexity": "complex"
+    },
+    {
+      "id": "q_053",
+      "query": "OpenAI和LangChain有什么区别？",
+      "complexity": "medium"
+    },
+    {
+      "id": "q_005",
+      "query": "如何重置RabbitMQ？",
+      "complexity": "simple"
+    },
+    {
+      "id": "q_011",
+      "query": "如何重置RAGFlow？",
+      "complexity": "simple"
+    }
+  ]
+}

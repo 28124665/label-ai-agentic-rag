@@ -31,10 +31,13 @@ from openai import AsyncOpenAI, OpenAI
 from strenum import StrEnum
 
 from common.token_utils import num_tokens_from_string, total_token_count_from_response
+from api.utils import metrics
+from api.utils.structured_logger import log_generation
 from rag.llm import FACTORY_DEFAULT_BASE_URL, LITELLM_PROVIDER_PREFIX, SupportedLiteLLMProvider
 from rag.nlp import is_chinese, is_english
 
 from common.misc_utils import thread_pool_exec
+from api.utils.circuit_breaker import DegradedReason, get_breaker, make_degraded_response
 class LLMErrorCode(StrEnum):
     ERROR_RATE_LIMIT = "RATE_LIMIT_EXCEEDED"
     ERROR_AUTHENTICATION = "AUTH_ERROR"
@@ -60,6 +63,31 @@ LENGTH_NOTIFICATION_CN = "······\n由于大模型的上下文窗口大小�
 LENGTH_NOTIFICATION_EN = "...\nThe answer is truncated by your chosen LLM due to its limitation on context length."
 
 
+def _record_generation_metrics(
+    model_name: str,
+    tokens: int,
+    start_ts: float,
+    node: str = "generate",
+    status: str = "success",
+) -> None:
+    """Record LLM token consumption, cost and latency metrics."""
+    try:
+        duration_ms = (time.perf_counter() - start_ts) * 1000.0
+        model = model_name or "unknown"
+        metrics.rag_generate_latency_seconds.labels(model=model).observe(duration_ms / 1000.0)
+        metrics.record_llm_tokens(model, node, tokens)
+        log_generation(
+            trace_id="",
+            span_id="",
+            duration_ms=duration_ms,
+            status=status,
+            model=model,
+            tokens=tokens,
+        )
+    except Exception as e:
+        logging.warning("[LLM] Failed to record generation metrics: %s", e)
+
+
 class Base(ABC):
     def __init__(self, key, model_name, base_url, **kwargs):
         timeout = int(os.environ.get("LLM_TIMEOUT_SECONDS", 600))
@@ -73,6 +101,7 @@ class Base(ABC):
         self.is_tools = False
         self.tools = []
         self.toolcall_sessions = {}
+        self._breaker = get_breaker("llm")
 
     def _get_delay(self):
         return self.base_delay * random.uniform(10, 150)
@@ -171,11 +200,17 @@ class Base(ABC):
             yield ans, tol
 
     async def async_chat_streamly(self, system, history, gen_conf: dict = {}, **kwargs):
+        ans = ""
+        total_tokens = 0
+        start_ts = time.perf_counter()
+        if not self._breaker.allow_request():
+            yield make_degraded_response(DegradedReason.LLM_UNAVAILABLE)["message"]
+            yield total_tokens
+            return
+
         if system and history and history[0].get("role") != "system":
             history.insert(0, {"role": "system", "content": system})
         gen_conf = self._clean_conf(gen_conf)
-        ans = ""
-        total_tokens = 0
 
         for attempt in range(self.max_retries + 1):
             try:
@@ -184,11 +219,15 @@ class Base(ABC):
                     total_tokens += tol
                     yield ans
 
+                self._breaker.record_success()
+                _record_generation_metrics(self.model_name, total_tokens, start_ts)
                 yield total_tokens
                 return
             except Exception as e:
                 e = await self._exceptions_async(e, attempt)
                 if e:
+                    self._breaker.record_failure()
+                    _record_generation_metrics(self.model_name, total_tokens, start_ts, status="error")
                     yield e
                     yield total_tokens
                     return
@@ -276,6 +315,9 @@ class Base(ABC):
         self.tools = tools
 
     async def async_chat_with_tools(self, system: str, history: list, gen_conf: dict = {}):
+        if not self._breaker.allow_request():
+            return make_degraded_response(DegradedReason.LLM_UNAVAILABLE), 0
+
         gen_conf = self._clean_conf(gen_conf)
         if system and history and history[0].get("role") != "system":
             history.insert(0, {"role": "system", "content": system})
@@ -301,6 +343,7 @@ class Base(ABC):
                         if response.choices[0].finish_reason == "length":
                             ans = self._length_stop(ans)
 
+                        self._breaker.record_success()
                         return ans, tk_count
 
                     for tool_call in response.choices[0].message.tool_calls:
@@ -321,21 +364,28 @@ class Base(ABC):
                 response, token_count = await self._async_chat(history, gen_conf)
                 ans += response
                 tk_count += token_count
+                self._breaker.record_success()
                 return ans, tk_count
             except Exception as e:
                 e = await self._exceptions_async(e, attempt)
                 if e:
+                    self._breaker.record_failure()
                     return e, tk_count
 
         assert False, "Shouldn't be here."
 
     async def async_chat_streamly_with_tools(self, system: str, history: list, gen_conf: dict = {}):
+        total_tokens = 0
+        if not self._breaker.allow_request():
+            yield make_degraded_response(DegradedReason.LLM_UNAVAILABLE)["message"]
+            yield total_tokens
+            return
+
         gen_conf = self._clean_conf(gen_conf)
         tools = self.tools
         if system and history and history[0].get("role") != "system":
             history.insert(0, {"role": "system", "content": system})
 
-        total_tokens = 0
         hist = deepcopy(history)
 
         for attempt in range(self.max_retries + 1):
@@ -393,6 +443,7 @@ class Base(ABC):
                             yield self._length_stop("")
 
                     if answer:
+                        self._breaker.record_success()
                         yield total_tokens
                         return
 
@@ -427,12 +478,14 @@ class Base(ABC):
                         total_tokens = tol
                     yield delta.content
 
+                self._breaker.record_success()
                 yield total_tokens
                 return
 
             except Exception as e:
                 e = await self._exceptions_async(e, attempt)
                 if e:
+                    self._breaker.record_failure()
                     logging.error(f"async_chat_streamly failed: {e}")
                     yield e
                     yield total_tokens
@@ -471,16 +524,25 @@ class Base(ABC):
         return ans, total_token_count_from_response(response)
 
     async def async_chat(self, system, history, gen_conf={}, **kwargs):
+        if not self._breaker.allow_request():
+            return make_degraded_response(DegradedReason.LLM_UNAVAILABLE), 0
+
         if system and history and history[0].get("role") != "system":
             history.insert(0, {"role": "system", "content": system})
         gen_conf = self._clean_conf(gen_conf)
+        start_ts = time.perf_counter()
 
         for attempt in range(self.max_retries + 1):
             try:
-                return await self._async_chat(history, gen_conf, **kwargs)
+                result = await self._async_chat(history, gen_conf, **kwargs)
+                self._breaker.record_success()
+                _record_generation_metrics(self.model_name, result[1], start_ts)
+                return result
             except Exception as e:
                 e = await self._exceptions_async(e, attempt)
                 if e:
+                    self._breaker.record_failure()
+                    _record_generation_metrics(self.model_name, 0, start_ts, status="error")
                     return e, 0
         assert False, "Shouldn't be here."
 
@@ -552,12 +614,17 @@ class BaiChuanChat(Base):
         return ans, total_token_count_from_response(response)
 
     def chat_streamly(self, system, history, gen_conf={}, **kwargs):
+        ans = ""
+        total_tokens = 0
+        if not self._breaker.allow_request():
+            yield make_degraded_response(DegradedReason.LLM_UNAVAILABLE)["message"]
+            yield total_tokens
+            return
+
         if system and history and history[0].get("role") != "system":
             history.insert(0, {"role": "system", "content": system})
         if "max_tokens" in gen_conf:
             del gen_conf["max_tokens"]
-        ans = ""
-        total_tokens = 0
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -635,6 +702,9 @@ class LocalLLM(Base):
         yield num_tokens_from_string(answer)
 
     def chat(self, system, history, gen_conf={}, **kwargs):
+        if not self._breaker.allow_request():
+            return make_degraded_response(DegradedReason.LLM_UNAVAILABLE), 0
+
         if "max_tokens" in gen_conf:
             del gen_conf["max_tokens"]
         prompt = self._prepare_prompt(system, history, gen_conf)
@@ -644,6 +714,11 @@ class LocalLLM(Base):
         return ans, total_tokens
 
     def chat_streamly(self, system, history, gen_conf={}, **kwargs):
+        if not self._breaker.allow_request():
+            yield make_degraded_response(DegradedReason.LLM_UNAVAILABLE)["message"]
+            yield 0
+            return
+
         if "max_tokens" in gen_conf:
             del gen_conf["max_tokens"]
         prompt = self._prepare_prompt(system, history, gen_conf)
@@ -1156,6 +1231,7 @@ class LiteLLMBase(ABC):
         self.is_tools = False
         self.tools = []
         self.toolcall_sessions = {}
+        self._breaker = get_breaker("llm")
 
         # Factory specific fields
         if self.provider == SupportedLiteLLMProvider.OpenRouter:
@@ -1217,6 +1293,9 @@ class LiteLLMBase(ABC):
         return gen_conf
 
     async def async_chat(self, system, history, gen_conf, **kwargs):
+        if not self._breaker.allow_request():
+            return make_degraded_response(DegradedReason.LLM_UNAVAILABLE), 0
+
         hist = list(history) if history else []
         if system:
             if not hist or hist[0].get("role") != "system":
@@ -1227,6 +1306,7 @@ class LiteLLMBase(ABC):
             kwargs["extra_body"] = {"enable_thinking": False}
 
         completion_args = self._construct_completion_args(history=hist, stream=False, tools=False, **{**gen_conf, **kwargs})
+        start_ts = time.perf_counter()
 
         for attempt in range(self.max_retries + 1):
             try:
@@ -1237,26 +1317,39 @@ class LiteLLMBase(ABC):
                 )
 
                 if any([not response.choices, not response.choices[0].message, not response.choices[0].message.content]):
+                    self._breaker.record_success()
+                    _record_generation_metrics(self.model_name, 0, start_ts)
                     return "", 0
                 ans = response.choices[0].message.content.strip()
                 if response.choices[0].finish_reason == "length":
                     ans = self._length_stop(ans)
 
-                return ans, total_token_count_from_response(response)
+                self._breaker.record_success()
+                tokens = total_token_count_from_response(response)
+                _record_generation_metrics(self.model_name, tokens, start_ts)
+                return ans, tokens
             except Exception as e:
                 e = await self._exceptions_async(e, attempt)
                 if e:
+                    self._breaker.record_failure()
+                    _record_generation_metrics(self.model_name, 0, start_ts, status="error")
                     return e, 0
 
         assert False, "Shouldn't be here."
 
     async def async_chat_streamly(self, system, history, gen_conf, **kwargs):
+        total_tokens = 0
+        start_ts = time.perf_counter()
+        if not self._breaker.allow_request():
+            yield make_degraded_response(DegradedReason.LLM_UNAVAILABLE)["message"]
+            yield total_tokens
+            return
+
         if system and history and history[0].get("role") != "system":
             history.insert(0, {"role": "system", "content": system})
         logging.info("[HISTORY STREAMLY]" + json.dumps(history, ensure_ascii=False, indent=4))
         gen_conf = self._clean_conf(gen_conf)
         reasoning_start = False
-        total_tokens = 0
 
         completion_args = self._construct_completion_args(history=history, stream=True, tools=False, **gen_conf)
         stop = kwargs.get("stop")
@@ -1302,11 +1395,15 @@ class LiteLLMBase(ABC):
                             ans += LENGTH_NOTIFICATION_EN
 
                     yield ans
+                self._breaker.record_success()
+                _record_generation_metrics(self.model_name, total_tokens, start_ts)
                 yield total_tokens
                 return
             except Exception as e:
                 e = await self._exceptions_async(e, attempt)
                 if e:
+                    self._breaker.record_failure()
+                    _record_generation_metrics(self.model_name, total_tokens, start_ts, status="error")
                     yield e
                     yield total_tokens
                     return
@@ -1376,6 +1473,9 @@ class LiteLLMBase(ABC):
         self.tools = tools
 
     async def async_chat_with_tools(self, system: str, history: list, gen_conf: dict = {}):
+        if not self._breaker.allow_request():
+            return make_degraded_response(DegradedReason.LLM_UNAVAILABLE), 0
+
         gen_conf = self._clean_conf(gen_conf)
         if system and history and history[0].get("role") != "system":
             history.insert(0, {"role": "system", "content": system})
@@ -1409,6 +1509,7 @@ class LiteLLMBase(ABC):
                         ans += message.content or ""
                         if response.choices[0].finish_reason == "length":
                             ans = self._length_stop(ans)
+                        self._breaker.record_success()
                         return ans, tk_count
 
                     for tool_call in message.tool_calls:
@@ -1430,22 +1531,29 @@ class LiteLLMBase(ABC):
                 response, token_count = await self.async_chat("", history, gen_conf)
                 ans += response
                 tk_count += token_count
+                self._breaker.record_success()
                 return ans, tk_count
 
             except Exception as e:
                 e = await self._exceptions_async(e, attempt)
                 if e:
+                    self._breaker.record_failure()
                     return e, tk_count
 
         assert False, "Shouldn't be here."
 
     async def async_chat_streamly_with_tools(self, system: str, history: list, gen_conf: dict = {}):
+        total_tokens = 0
+        if not self._breaker.allow_request():
+            yield make_degraded_response(DegradedReason.LLM_UNAVAILABLE)["message"]
+            yield total_tokens
+            return
+
         gen_conf = self._clean_conf(gen_conf)
         tools = self.tools
         if system and history and history[0].get("role") != "system":
             history.insert(0, {"role": "system", "content": system})
 
-        total_tokens = 0
         hist = deepcopy(history)
 
         for attempt in range(self.max_retries + 1):
@@ -1508,6 +1616,7 @@ class LiteLLMBase(ABC):
                             yield self._length_stop("")
 
                     if answer:
+                        self._breaker.record_success()
                         yield total_tokens
                         return
 
@@ -1547,12 +1656,14 @@ class LiteLLMBase(ABC):
                         total_tokens = tol
                     yield delta.content
 
+                self._breaker.record_success()
                 yield total_tokens
                 return
 
             except Exception as e:
                 e = await self._exceptions_async(e, attempt)
                 if e:
+                    self._breaker.record_failure()
                     yield e
                     yield total_tokens
                     return

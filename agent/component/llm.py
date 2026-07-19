@@ -27,7 +27,9 @@ from api.db.services.llm_service import LLMBundle
 from api.db.services.tenant_llm_service import TenantLLMService
 from api.db.joint_services.tenant_model_service import get_model_config_by_type_and_name
 from agent.component.base import ComponentBase, ComponentParamBase
+from api.utils.prompt_builder import build_prompt
 from common.connection_utils import timeout
+from rag.nlp.lang_detect import LANG_ZH_SIMPLIFIED, detect_language
 from rag.prompts.generator import tool_call_summary, message_fit_in, citation_prompt, structured_output_prompt
 
 
@@ -61,6 +63,7 @@ class LLMParam(ComponentParamBase):
 
     def gen_conf(self):
         conf = {}
+
         def get_attr(nm):
             try:
                 return getattr(self, nm)
@@ -86,18 +89,13 @@ class LLM(ComponentBase):
     def __init__(self, canvas, component_id, param: ComponentParamBase):
         super().__init__(canvas, component_id, param)
         chat_model_config = get_model_config_by_type_and_name(self._canvas.get_tenant_id(), TenantLLMService.llm_id2llm_type(self._param.llm_id), self._param.llm_id)
-        self.chat_mdl = LLMBundle(self._canvas.get_tenant_id(), chat_model_config,
-                                  max_retries=self._param.max_retries,
-                                  retry_interval=self._param.delay_after_error)
+        self.chat_mdl = LLMBundle(self._canvas.get_tenant_id(), chat_model_config, max_retries=self._param.max_retries, retry_interval=self._param.delay_after_error)
         self.imgs = []
 
     def get_input_form(self) -> dict[str, dict]:
         res = {}
         for k, v in self.get_input_elements().items():
-            res[k] = {
-                "type": "line",
-                "name": v["name"]
-            }
+            res[k] = {"type": "line", "name": v["name"]}
         return res
 
     def get_input_elements(self) -> dict[str, Any]:
@@ -224,6 +222,28 @@ class LLM(ComponentBase):
 
         return value
 
+    def _build_enhanced_prompt(self, query: str, chunks: list[dict], query_lang: str) -> str:
+        """使用 prompt_builder 构建增强版 Prompt（基于 original_text 与多语言指令）。
+
+        对应设计文档「Prompt 构建与输出语言控制」章节。
+
+        与原 ``citation_prompt`` 的区别：
+
+        - context 部分使用每个 chunk 的 ``original_text`` 字段（保留原文语言，
+          例如台湾繁体原文），而非 ``content`` 字段，让 LLM 基于完整原文语义作答；
+        - 末尾追加输出语言指令（根据 ``query_lang`` 选择繁体 / 简体 / 英文），
+          通过 Prompt 指令控制 LLM 输出语言，而非后处理转换。
+
+        Args:
+            query: 用户查询字符串。
+            chunks: 检索到的上下文 chunk 列表（需包含 ``original_text`` 字段）。
+            query_lang: 查询语言标识（``zh-simplified`` / ``zh-traditional`` / ``en``）。
+
+        Returns:
+            完整的 Prompt 字符串，包含 context、query 与输出语言指令。
+        """
+        return build_prompt(query, chunks, query_lang)
+
     def _prepare_prompt_variables(self):
         self.imgs = []
         if self._param.visual_files_var:
@@ -247,26 +267,35 @@ class LLM(ComponentBase):
 
         self.imgs = self._uniq_images(self.imgs + extracted_imgs)
         if self.imgs and TenantLLMService.llm_id2llm_type(self._param.llm_id) == LLMType.CHAT.value:
-            self.chat_mdl = LLMBundle(self._canvas.get_tenant_id(), LLMType.IMAGE2TEXT.value,
-                                      self._param.llm_id, max_retries=self._param.max_retries,
-                                      retry_interval=self._param.delay_after_error
-                                      )
+            self.chat_mdl = LLMBundle(self._canvas.get_tenant_id(), LLMType.IMAGE2TEXT.value, self._param.llm_id, max_retries=self._param.max_retries, retry_interval=self._param.delay_after_error)
 
         msg, sys_prompt = self._sys_prompt_and_msg(self._canvas.get_history(self._param.message_history_window_size)[:-1], args)
         user_defined_prompt, sys_prompt = self._extract_prompts(sys_prompt)
         if self._param.cite and self._canvas.get_reference()["chunks"]:
-            sys_prompt += citation_prompt(user_defined_prompt)
+            chunks = self._canvas.get_reference()["chunks"]
+            # 当 chunks 包含 original_text 字段时，使用增强版 Prompt（基于 original_text 与多语言指令）
+            # 否则保留原行为（使用 citation_prompt），保证旧数据 / 旧链路向后兼容
+            if chunks and all("original_text" in c for c in chunks):
+                query = args.get("query", "")
+                if not isinstance(query, str):
+                    query = str(query) if query else ""
+                # 从查询文本检测语言（不依赖 Retrieval 组件的状态，保持组件解耦）
+                # 检测失败或空查询时默认按简体中文兜底
+                query_lang = detect_language(query) if query else LANG_ZH_SIMPLIFIED
+                sys_prompt += "\n\n" + self._build_enhanced_prompt(query, chunks, query_lang)
+            else:
+                sys_prompt += citation_prompt(user_defined_prompt)
 
         return sys_prompt, msg, user_defined_prompt
 
     def _extract_prompts(self, sys_prompt):
         pts = {}
         for tag in ["TASK_ANALYSIS", "PLAN_GENERATION", "REFLECTION", "CONTEXT_SUMMARY", "CONTEXT_RANKING", "CITATION_GUIDELINES"]:
-            r = re.search(rf"<{tag}>(.*?)</{tag}>", sys_prompt, flags=re.DOTALL|re.IGNORECASE)
+            r = re.search(rf"<{tag}>(.*?)</{tag}>", sys_prompt, flags=re.DOTALL | re.IGNORECASE)
             if not r:
                 continue
             pts[tag.lower()] = r.group(1)
-            sys_prompt = re.sub(rf"<{tag}>(.*?)</{tag}>", "", sys_prompt, flags=re.DOTALL|re.IGNORECASE)
+            sys_prompt = re.sub(rf"<{tag}>(.*?)</{tag}>", "", sys_prompt, flags=re.DOTALL | re.IGNORECASE)
         return pts, sys_prompt
 
     async def _generate_async(self, msg: list[dict], **kwargs) -> str:
@@ -289,7 +318,7 @@ class LLM(ComponentBase):
                     last_idx += len("<think>")
                     return "<think>"
                 elif delta_ans.find("<think>") > 0:
-                    delta_ans = txt[last_idx:last_idx + delta_ans.find("<think>")]
+                    delta_ans = txt[last_idx : last_idx + delta_ans.find("<think>")]
                     last_idx += delta_ans.find("<think>")
                     return delta_ans
                 elif delta_ans.endswith("</think>"):
@@ -329,7 +358,7 @@ class LLM(ComponentBase):
                 last_idx += len("<think>")
                 return "<think>"
             elif delta_ans.find("<think>") > 0:
-                delta_ans = txt[last_idx:last_idx + delta_ans.find("<think>")]
+                delta_ans = txt[last_idx : last_idx + delta_ans.find("<think>")]
                 last_idx += delta_ans.find("<think>")
                 return delta_ans
             elif delta_ans.endswith("</think>"):
@@ -363,7 +392,7 @@ class LLM(ComponentBase):
 
         self.set_output("content", answer)
 
-    @timeout(int(os.environ.get("COMPONENT_EXEC_TIMEOUT", 10*60)))
+    @timeout(int(os.environ.get("COMPONENT_EXEC_TIMEOUT", 10 * 60)))
     async def _invoke_async(self, **kwargs):
         if self.check_if_canceled("LLM processing"):
             return
@@ -410,9 +439,7 @@ class LLM(ComponentBase):
 
         downstreams = self._canvas.get_component(self._id)["downstream"] if self._canvas.get_component(self._id) else []
         ex = self.exception_handler()
-        if any([self._canvas.get_component_obj(cid).component_name.lower() == "message" for cid in downstreams]) and not (
-            ex and ex["goto"]
-        ):
+        if any([self._canvas.get_component_obj(cid).component_name.lower() == "message" for cid in downstreams]) and not (ex and ex["goto"]):
             self.set_output("content", partial(self._stream_output_async, prompt, deepcopy(msg)))
             return
 
@@ -421,9 +448,7 @@ class LLM(ComponentBase):
             if self.check_if_canceled("LLM processing"):
                 return
 
-            _, msg_fit = message_fit_in(
-                [{"role": "system", "content": prompt}, *deepcopy(msg)], int(self.chat_mdl.max_length * 0.97)
-            )
+            _, msg_fit = message_fit_in([{"role": "system", "content": prompt}, *deepcopy(msg)], int(self.chat_mdl.max_length * 0.97))
             error = ""
             ans = await self._generate_async(msg_fit)
             msg_fit.pop(0)
@@ -440,15 +465,15 @@ class LLM(ComponentBase):
             else:
                 self.set_output("_ERROR", error)
 
-    @timeout(int(os.environ.get("COMPONENT_EXEC_TIMEOUT", 10*60)))
+    @timeout(int(os.environ.get("COMPONENT_EXEC_TIMEOUT", 10 * 60)))
     def _invoke(self, **kwargs):
         return asyncio.run(self._invoke_async(**kwargs))
 
-    async def add_memory(self, user:str, assist:str, func_name: str, params: dict, results: str, user_defined_prompt:dict={}):
+    async def add_memory(self, user: str, assist: str, func_name: str, params: dict, results: str, user_defined_prompt: dict = {}):
         summ = await tool_call_summary(self.chat_mdl, func_name, params, results, user_defined_prompt)
         logging.info(f"[MEMORY]: {summ}")
         self._canvas.add_memory(user, assist, summ)
 
     def thoughts(self) -> str:
-        _, msg,_ = self._prepare_prompt_variables()
-        return "⌛Give me a moment—starting from: \n\n" + re.sub(r"(User's query:|[\\]+)", '', msg[-1]['content'], flags=re.DOTALL) + "\n\nI’ll figure out our best next move."
+        _, msg, _ = self._prepare_prompt_variables()
+        return "⌛Give me a moment—starting from: \n\n" + re.sub(r"(User's query:|[\\]+)", "", msg[-1]["content"], flags=re.DOTALL) + "\n\nI’ll figure out our best next move."

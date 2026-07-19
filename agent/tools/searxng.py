@@ -19,6 +19,7 @@ import time
 from abc import ABC
 import requests
 from agent.tools.base import ToolMeta, ToolParamBase, ToolBase
+from api.utils.circuit_breaker import DegradedReason, get_breaker, make_degraded_response
 from common.connection_utils import timeout
 
 
@@ -77,6 +78,10 @@ class SearXNGParam(ToolParamBase):
 class SearXNG(ToolBase, ABC):
     component_name = "SearXNG"
 
+    def __init__(self, canvas, id, param):
+        super().__init__(canvas, id, param)
+        self._breaker = get_breaker("web_search")
+
     @timeout(int(os.environ.get("COMPONENT_EXEC_TIMEOUT", 12)))
     def _invoke(self, **kwargs):
         if self.check_if_canceled("SearXNG processing"):
@@ -91,6 +96,13 @@ class SearXNG(ToolBase, ABC):
         searxng_url = (getattr(self._param, "searxng_url", "") or kwargs.get("searxng_url") or "").strip()
         # In try-run, if no URL configured, just return empty instead of raising
         if not searxng_url:
+            self.set_output("formalized_content", "")
+            return ""
+
+        if not self._breaker.allow_request():
+            degraded = make_degraded_response(DegradedReason.WEB_SEARCH_UNAVAILABLE)
+            self.set_output("degraded", degraded)
+            self.set_output("json", [])
             self.set_output("formalized_content", "")
             return ""
 
@@ -138,6 +150,7 @@ class SearXNG(ToolBase, ABC):
                                       get_url=lambda r: r.get("url", ""),
                                       get_content=lambda r: r.get("content", ""))
 
+                self._breaker.record_success()
                 self.set_output("json", results)
                 return self.output("formalized_content")
 
@@ -157,6 +170,7 @@ class SearXNG(ToolBase, ABC):
                 time.sleep(self._param.delay_after_error)
 
         if last_e:
+            self._breaker.record_failure()
             self.set_output("_ERROR", last_e)
             return f"SearXNG error: {last_e}"
 

@@ -13,7 +13,9 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
+import functools
 import json
+import logging
 from abc import ABC
 from urllib.parse import urljoin
 
@@ -24,14 +26,56 @@ from yarl import URL
 
 from common.log_utils import log_exception
 from common.token_utils import num_tokens_from_string, truncate, total_token_count_from_response
+from api.utils.circuit_breaker import get_breaker
+
 
 class Base(ABC):
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        Base._wrap_subclass_similarity(cls)
+
+    @staticmethod
+    def _wrap_subclass_similarity(cls):
+        """Wrap a concrete subclass's similarity with circuit breaker + fallback."""
+        if getattr(cls.similarity, "_breaker_wrapped", False):
+            return
+        original = cls.similarity
+
+        @functools.wraps(original)
+        def wrapper(self, query: str, texts: list):
+            breaker = getattr(self, "_breaker", None) or get_breaker("rerank")
+            if not breaker.allow_request():
+                return Base._rerank_fallback(self, texts)
+            try:
+                result = original(self, query, texts)
+                breaker.record_success()
+                return result
+            except Exception as e:
+                breaker.record_failure()
+                logging.warning(
+                    f"[Rerank:{self.__class__.__name__}] call failed, falling back to original order: {e}"
+                )
+                return Base._rerank_fallback(self, texts)
+
+        wrapper._breaker_wrapped = True
+        cls.similarity = wrapper
+
+    def _rerank_fallback(self, texts: list):
+        """Fallback preserving the original retrieval order.
+
+        Returns a uniform score for each text so callers can keep the
+        original ranking when the rerank service is unavailable.
+        """
+        rank = np.ones(len(texts), dtype=float)
+        token_count = sum(num_tokens_from_string(t) for t in texts)
+        return rank, token_count
+
     def __init__(self, key, model_name, **kwargs):
         """
         Abstract base class constructor.
         Parameters are not stored; initialization is left to subclasses.
         """
-        pass
+        self._breaker = get_breaker("rerank")
 
     def similarity(self, query: str, texts: list):
         raise NotImplementedError("Please implement encode method!")

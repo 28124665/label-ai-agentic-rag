@@ -20,6 +20,17 @@
       "lat_lon": {
         "type": "geo_point",
         "store": "true"
+      },
+      "original_text": {
+        "type": "text",
+        "index": false
+      },
+      "original_lang": {
+        "type": "keyword"
+      },
+      "search_text": {
+        "type": "text",
+        "analyzer": "standard"
       }
     },
     "date_detection": "true",

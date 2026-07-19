@@ -30,6 +30,7 @@ import (
 
 	"ragflow/internal/engine/types"
 	"ragflow/internal/logger"
+	"ragflow/internal/utility"
 )
 
 // SearchRequest Elasticsearch search request (legacy, kept for backward compatibility)
@@ -74,6 +75,27 @@ func (e *elasticsearchEngine) Search(ctx context.Context, req interface{}) (inte
 
 // searchUnified handles the unified engine.SearchRequest
 func (e *elasticsearchEngine) searchUnified(ctx context.Context, req *types.SearchRequest) (*types.SearchResponse, error) {
+	breaker := utility.GetBreaker("es")
+	if !breaker.AllowRequest() {
+		return &types.SearchResponse{
+			Chunks:         []map[string]interface{}{},
+			Total:          0,
+			Degraded:       true,
+			DegradedReason: "es_unavailable",
+		}, nil
+	}
+
+	resp, err := e.doSearchUnified(ctx, req)
+	if err != nil {
+		breaker.RecordFailure()
+		return nil, err
+	}
+	breaker.RecordSuccess()
+	return resp, nil
+}
+
+// doSearchUnified performs the actual Elasticsearch search.
+func (e *elasticsearchEngine) doSearchUnified(ctx context.Context, req *types.SearchRequest) (*types.SearchResponse, error) {
 	if len(req.IndexNames) == 0 {
 		return nil, fmt.Errorf("index names cannot be empty")
 	}
