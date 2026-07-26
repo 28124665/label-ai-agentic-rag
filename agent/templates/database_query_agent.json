@@ -1,0 +1,258 @@
+{
+    "id": 100,
+    "title": {
+        "en": "Database Query Agent",
+        "zh": "数据库查询助手",
+        "de": "Datenbankabfrage-Assistent"
+    },
+    "description": {
+        "en": "This workflow enables natural language database queries. The Agent will progressively discover database schema (list tables → describe table → execute SQL) and return structured results. Supports multiple business databases including MES, ERP, QMS, PLM, WMS.",
+        "zh": "此工作流支持自然语言数据库查询。Agent 将渐进式发现数据库结构（列出表 → 查看表结构 → 执行 SQL），并返回结构化结果。支持 MES、ERP、QMS、PLM、WMS 等多个业务数据库。",
+        "de": "Dieser Workflow ermöglicht Datenbankabfragen in natürlicher Sprache. Der Agent entdeckt progressiv die Datenbankstruktur (Tabellen auflisten → Tabelle beschreiben → SQL ausführen) und gibt strukturierte Ergebnisse zurück."
+    },
+    "canvas_type": "Recommended",
+    "dsl": {
+        "components": {
+            "begin": {
+                "downstream": ["Agent:DatabaseAgent"],
+                "obj": {
+                    "component_name": "Begin",
+                    "params": {
+                        "enablePrologue": true,
+                        "inputs": {},
+                        "mode": "conversational",
+                        "prologue": "您好！我是数据库查询助手。\n\n我可以帮您查询企业各业务系统的结构化数据，包括：\n- 📊 生产制造数据（产量、工单、设备OEE）\n- 💰 财务供应链数据（采购、成本、库存）\n- 🔍 品质管理数据（良率、检验）\n- 📦 仓储物流数据（库存、出入库）\n\n请告诉我您想查询什么数据？"
+                    }
+                },
+                "upstream": []
+            },
+            "Agent:DatabaseAgent": {
+                "downstream": ["Message:Response"],
+                "obj": {
+                    "component_name": "Agent",
+                    "params": {
+                        "delay_after_error": 1,
+                        "description": "数据库查询 Agent，通过渐进式 Schema 发现执行数据库查询",
+                        "exception_comment": "",
+                        "exception_default_value": "查询遇到问题，请稍后重试或换个方式描述。",
+                        "exception_goto": [],
+                        "exception_method": null,
+                        "frequencyPenaltyEnabled": false,
+                        "frequency_penalty": 0.3,
+                        "llm_id": "deepseek-chat@DeepSeek",
+                        "maxTokensEnabled": false,
+                        "max_retries": 3,
+                        "max_rounds": 8,
+                        "max_tokens": 4096,
+                        "mcp": [],
+                        "message_history_window_size": 12,
+                        "outputs": {
+                            "content": {
+                                "type": "string",
+                                "value": ""
+                            }
+                        },
+                        "parameter": "Precise",
+                        "presencePenaltyEnabled": false,
+                        "presence_penalty": 0.2,
+                        "prompts": [
+                            {
+                                "content": "用户的问题是：{sys.query}",
+                                "role": "user"
+                            }
+                        ],
+                        "sys_prompt": "# 角色\n\n你是一个企业数据库查询专家。你的任务是通过自然语言帮助用户查询企业各业务系统的结构化数据。\n\n# 可用工具\n\n你有三个数据库工具，必须严格按照以下顺序使用：\n\n1. **ListTablesTool**：获取指定数据库的表名清单\n   - 参数：`db_id`（数据库 ID，如 mes_prod、erp_prod）\n   - 用途：第一步，先了解目标数据库有哪些表\n\n2. **DescribeTableTool**：获取指定表的字段详情\n   - 参数：`db_id`（数据库 ID）、`table_name`（表名）\n   - 用途：第二步，了解相关表的字段结构\n\n3. **ExecuteSQLTool**：执行 SQL 查询\n   - 参数：`db_id`（数据库 ID）、`sql`（SQL 语句）\n   - 用途：第三步，执行查询并获取结果\n\n# 可用数据库\n\n| 数据库 ID | 系统名称 | 业务场景 | 典型查询 |\n|-----------|---------|---------|----------|\n| mes_prod | MES 制造执行系统 | 生产工单、设备状态、产量、OEE | \"Q3 各厂区产量\" |\n| erp_prod | ERP 生产数据库 | 财务、供应链、采购、成本 | \"采购金额\" |\n| qms_prod | QMS 品质管理系统 | 来料检验、制程检验、良率 | \"本月良率\" |\n| clean_db | 数据清洗库 | 清洗后的结构化数据 | \"清洗数据条数\" |\n| plm_prod | PLM 产品生命周期 | BOM、工程变更、工艺参数 | \"BOM 物料清单\" |\n| wms_prod | WMS 仓储管理系统 | 库存、出入库、库位 | \"SKU 库存\" |\n\n# 工作流程（必须严格遵循）\n\n**第一步：判断目标数据库**\n根据用户问题中的关键词，判断应该查询哪个数据库。\n\n**第二步：获取表名清单**\n调用 ListTablesTool，传入 db_id，获取该数据库的所有表名。\n\n**第三步：筛选相关表**\n从表名清单中，根据用户问题筛选出最相关的 1-3 张表。\n\n**第四步：获取表结构**\n对每张相关表调用 DescribeTableTool，获取字段名、数据类型、注释。\n\n**第五步：生成并执行 SQL**\n根据表结构和用户问题，生成 SELECT SQL，调用 ExecuteSQLTool 执行。\n- SQL 必须是只读的 SELECT 语句\n- 只使用已获取的表名和字段名，禁止编造\n- 默认添加 LIMIT 100\n\n**第六步：整理答案**\n将查询结果整理为自然语言回答，包含关键数据和业务洞察。\n\n# 重要规则\n\n1. **禁止跳过步骤**：必须先探查表结构，再生成 SQL\n2. **禁止编造**：不要凭空猜测表名或字段名\n3. **只读查询**：只生成 SELECT 语句，禁止 INSERT/UPDATE/DELETE\n4. **错误处理**：如果 SQL 执行失败，分析错误信息，重新调整 SQL 后重试（最多重试 2 次）\n5. **结果解读**：不要只返回原始数据，要用自然语言解释数据含义\n\n# 示例\n\n用户：Q3 各厂区产量是多少？\n\n思考过程：\n1. \"产量\" → 应该查 MES 数据库（mes_prod）\n2. 调用 ListTablesTool(db_id=\"mes_prod\") → 获取表名清单\n3. 筛选：output_record（产量记录表）最相关\n4. 调用 DescribeTableTool(db_id=\"mes_prod\", table_name=\"output_record\") → 获取字段\n5. 生成 SQL：SELECT factory_code, SUM(quantity) as total_output FROM output_record WHERE record_date >= '2024-07-01' AND record_date <= '2024-09-30' GROUP BY factory_code ORDER BY total_output DESC\n6. 调用 ExecuteSQLTool(db_id=\"mes_prod\", sql=\"...\") → 获取结果\n7. 整理为自然语言回答",
+                        "temperature": 0.2,
+                        "temperatureEnabled": true,
+                        "tools": [
+                            {
+                                "component_name": "ListTablesTool",
+                                "name": "ListTablesTool",
+                                "params": {
+                                    "db_id": "",
+                                    "mcp_server_name": "database_mcp_server",
+                                    "db_schema_config": "conf/db_schema.yaml",
+                                    "outputs": {
+                                        "formalized_content": {
+                                            "type": "string",
+                                            "value": ""
+                                        },
+                                        "json": {
+                                            "type": "string",
+                                            "value": ""
+                                        }
+                                    }
+                                }
+                            },
+                            {
+                                "component_name": "DescribeTableTool",
+                                "name": "DescribeTableTool",
+                                "params": {
+                                    "db_id": "",
+                                    "table_name": "",
+                                    "mcp_server_name": "database_mcp_server",
+                                    "db_schema_config": "conf/db_schema.yaml",
+                                    "outputs": {
+                                        "formalized_content": {
+                                            "type": "string",
+                                            "value": ""
+                                        },
+                                        "json": {
+                                            "type": "string",
+                                            "value": ""
+                                        }
+                                    }
+                                }
+                            },
+                            {
+                                "component_name": "ExecuteSQLTool",
+                                "name": "ExecuteSQLTool",
+                                "params": {
+                                    "db_id": "",
+                                    "sql": "",
+                                    "mcp_server_name": "database_mcp_server",
+                                    "db_schema_config": "conf/db_schema.yaml",
+                                    "outputs": {
+                                        "formalized_content": {
+                                            "type": "string",
+                                            "value": ""
+                                        },
+                                        "json": {
+                                            "type": "string",
+                                            "value": ""
+                                        }
+                                    }
+                                }
+                            }
+                        ],
+                        "topPEnabled": false,
+                        "top_p": 0.85,
+                        "user_prompt": "",
+                        "visual_files_var": ""
+                    }
+                },
+                "upstream": ["begin"]
+            },
+            "Message:Response": {
+                "downstream": [],
+                "obj": {
+                    "component_name": "Message",
+                    "params": {
+                        "content": [
+                            "{Agent:DatabaseAgent@content}"
+                        ]
+                    }
+                },
+                "upstream": ["Agent:DatabaseAgent"]
+            }
+        },
+        "globals": {
+            "sys.conversation_turns": 0,
+            "sys.files": [],
+            "sys.query": "",
+            "sys.user_id": ""
+        },
+        "graph": {
+            "edges": [
+                {
+                    "id": "xy-edge__beginstart-Agent:DatabaseAgentend",
+                    "source": "begin",
+                    "sourceHandle": "start",
+                    "target": "Agent:DatabaseAgent",
+                    "targetHandle": "end"
+                },
+                {
+                    "id": "xy-edge__Agent:DatabaseAgentstart-Message:Responseend",
+                    "source": "Agent:DatabaseAgent",
+                    "sourceHandle": "start",
+                    "target": "Message:Response",
+                    "targetHandle": "end"
+                }
+            ],
+            "nodes": [
+                {
+                    "data": {
+                        "form": {
+                            "enablePrologue": true,
+                            "inputs": {},
+                            "mode": "conversational",
+                            "prologue": "您好！我是数据库查询助手。\n\n我可以帮您查询企业各业务系统的结构化数据，包括：\n- 📊 生产制造数据（产量、工单、设备OEE）\n- 💰 财务供应链数据（采购、成本、库存）\n- 🔍 品质管理数据（良率、检验）\n- 📦 仓储物流数据（库存、出入库）\n\n请告诉我您想查询什么数据？"
+                        },
+                        "label": "Begin",
+                        "name": "begin"
+                    },
+                    "id": "begin",
+                    "position": {"x": 50, "y": 200},
+                    "type": "beginNode"
+                },
+                {
+                    "data": {
+                        "form": {
+                            "delay_after_error": 1,
+                            "description": "数据库查询 Agent，通过渐进式 Schema 发现执行数据库查询",
+                            "llm_id": "deepseek-chat@DeepSeek",
+                            "max_rounds": 8,
+                            "max_tokens": 4096,
+                            "mcp": [],
+                            "parameter": "Precise",
+                            "temperature": 0.2,
+                            "temperatureEnabled": true,
+                            "tools": [
+                                {
+                                    "component_name": "ListTablesTool",
+                                    "name": "ListTablesTool",
+                                    "params": {
+                                        "db_id": "",
+                                        "mcp_server_name": "database_mcp_server",
+                                        "db_schema_config": "conf/db_schema.yaml"
+                                    }
+                                },
+                                {
+                                    "component_name": "DescribeTableTool",
+                                    "name": "DescribeTableTool",
+                                    "params": {
+                                        "db_id": "",
+                                        "table_name": "",
+                                        "mcp_server_name": "database_mcp_server",
+                                        "db_schema_config": "conf/db_schema.yaml"
+                                    }
+                                },
+                                {
+                                    "component_name": "ExecuteSQLTool",
+                                    "name": "ExecuteSQLTool",
+                                    "params": {
+                                        "db_id": "",
+                                        "sql": "",
+                                        "mcp_server_name": "database_mcp_server",
+                                        "db_schema_config": "conf/db_schema.yaml"
+                                    }
+                                }
+                            ]
+                        },
+                        "label": "Agent",
+                        "name": "Database Query Agent"
+                    },
+                    "id": "Agent:DatabaseAgent",
+                    "position": {"x": 350, "y": 200},
+                    "type": "agentNode"
+                },
+                {
+                    "data": {
+                        "form": {
+                            "content": ["{Agent:DatabaseAgent@content}"]
+                        },
+                        "label": "Message",
+                        "name": "Response"
+                    },
+                    "id": "Message:Response",
+                    "position": {"x": 650, "y": 200},
+                    "type": "messageNode"
+                }
+            ]
+        },
+        "history": [],
+        "messages": [],
+        "path": [],
+        "retrieval": []
+    }
+}

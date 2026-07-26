@@ -1,0 +1,93 @@
+# 查询模板配置文件
+# 定义高频业务场景的预定义 SQL 模板
+
+templates:
+  # 产量查询模板
+  - name: "query_production_output"
+    description: "查询指定时间范围的产量"
+    keywords: ["产量", "产出", "output", "production"]
+    database: "mes-prod"
+    sql: |
+      SELECT factory_code, product_name, SUM(quantity) as total_output
+      FROM output_record
+      WHERE record_date BETWEEN :start_date AND :end_date
+      GROUP BY factory_code, product_name
+      ORDER BY total_output DESC
+    parameters:
+      - name: "start_date"
+        type: "date"
+        description: "开始日期"
+        required: true
+      - name: "end_date"
+        type: "date"
+        description: "结束日期"
+        required: true
+
+  # 库存查询模板
+  - name: "query_inventory"
+    description: "查询指定SKU的当前库存"
+    keywords: ["库存", "存量", "stock", "inventory"]
+    database: "erp-prod"
+    sql: |
+      SELECT sku_id, product_name, stock_quantity, warehouse_name, last_update_time
+      FROM inventory_current
+      WHERE sku_id = :sku_id
+    parameters:
+      - name: "sku_id"
+        type: "string"
+        description: "SKU编号"
+        required: true
+
+  # 良率查询模板
+  - name: "query_yield_rate"
+    description: "查询指定时间范围的良率"
+    keywords: ["良率", "良品率", "yield", "quality"]
+    database: "mes-prod"
+    sql: |
+      SELECT factory_code, 
+             SUM(CASE WHEN status = 'passed' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as yield_rate
+      FROM quality_inspection
+      WHERE inspection_date BETWEEN :start_date AND :end_date
+      GROUP BY factory_code
+      ORDER BY yield_rate DESC
+    parameters:
+      - name: "start_date"
+        type: "date"
+        description: "开始日期"
+        required: true
+      - name: "end_date"
+        type: "date"
+        description: "结束日期"
+        required: true
+
+  # 设备OEE查询模板
+  - name: "query_equipment_oee"
+    description: "查询设备OEE指标"
+    keywords: ["OEE", "设备效率", "equipment", "efficiency"]
+    database: "mes-prod"
+    sql: |
+      SELECT equipment_id, equipment_name, oee_value, record_time
+      FROM equipment_status
+      WHERE record_time >= :start_time
+      ORDER BY oee_value DESC
+    parameters:
+      - name: "start_time"
+        type: "timestamp"
+        description: "开始时间"
+        required: true
+
+  # 供应商评分查询模板
+  - name: "query_supplier_score"
+    description: "查询供应商评分"
+    keywords: ["供应商", "评分", "supplier", "score"]
+    database: "erp-prod"
+    sql: |
+      SELECT supplier_id, supplier_name, quality_score, delivery_score, evaluation_date
+      FROM supplier_score
+      WHERE evaluation_date >= :evaluation_date
+      ORDER BY (quality_score + delivery_score) / 2 DESC
+    parameters:
+      - name: "evaluation_date"
+        type: "date"
+        description: "评估日期"
+        required: true
