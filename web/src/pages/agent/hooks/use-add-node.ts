@@ -24,7 +24,10 @@ import {
   initialGithubValues,
   initialGoogleScholarValues,
   initialGoogleValues,
+  initialGraderValues,
+  initialHallucinationDetectorValues,
   initialHierarchicalMergerValues,
+  initialHyDEValues,
   initialInvokeValues,
   initialIterationStartValues,
   initialIterationValues,
@@ -35,11 +38,14 @@ import {
   initialPDFGeneratorValues,
   initialParserValues,
   initialPubMedValues,
+  initialQueryRewriterValues,
   initialRetrievalValues,
+  initialRetryControllerValues,
   initialRewriteQuestionValues,
   initialSearXNGValues,
   initialSplitterValues,
   initialStringTransformValues,
+  initialSubQueryDecomposerValues,
   initialSwitchValues,
   initialTavilyExtractValues,
   initialTavilyValues,
@@ -182,6 +188,19 @@ export const useInitializeOperatorParams = () => {
       [Operator.ExitLoop]: {},
       [Operator.PDFGenerator]: initialPDFGeneratorValues,
       [Operator.ExcelProcessor]: {},
+      // Phase 2 RAG Enhancement Components
+      [Operator.Grader]: { ...initialGraderValues, llm_id: llmId },
+      [Operator.HallucinationDetector]: {
+        ...initialHallucinationDetectorValues,
+        llm_id: llmId,
+      },
+      [Operator.QueryRewriter]: { ...initialQueryRewriterValues, llm_id: llmId },
+      [Operator.SubQueryDecomposer]: {
+        ...initialSubQueryDecomposerValues,
+        llm_id: llmId,
+      },
+      [Operator.HyDE]: { ...initialHyDEValues, llm_id: llmId },
+      [Operator.RetryController]: initialRetryControllerValues,
     };
   }, [llmId]);
 

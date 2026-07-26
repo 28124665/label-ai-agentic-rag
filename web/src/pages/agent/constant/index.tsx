@@ -692,6 +692,12 @@ export const RestrictedUpstreamMap = {
   [Operator.Loop]: [Operator.Begin],
   [Operator.LoopStart]: [Operator.Begin],
   [Operator.ExitLoop]: [Operator.Begin],
+  [Operator.Grader]: [Operator.Begin],
+  [Operator.HallucinationDetector]: [Operator.Begin],
+  [Operator.QueryRewriter]: [Operator.Begin],
+  [Operator.SubQueryDecomposer]: [Operator.Begin],
+  [Operator.HyDE]: [Operator.Begin],
+  [Operator.RetryController]: [Operator.Begin],
 };
 
 export const NodeMap = {

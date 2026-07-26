@@ -1,5 +1,6 @@
 import { FormInstance } from '@/interfaces/antd-compat';
 import { RAGFlowNodeType } from '@/interfaces/database/flow';
+import { UseFormReturn } from 'react-hook-form';
 
 export interface IOperatorForm {
   onValuesChange?(changedValues: any, values: any): void;
@@ -9,6 +10,7 @@ export interface IOperatorForm {
 }
 
 export interface INextOperatorForm {
+  form?: UseFormReturn<any, any, any>;
   node?: RAGFlowNodeType;
   nodeId?: string;
 }

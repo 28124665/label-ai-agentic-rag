@@ -96,6 +96,12 @@ export function AccordionOperators({
               Operator.VariableAssigner,
               Operator.ListOperations,
               Operator.VariableAggregator,
+              Operator.QueryRewriter,
+              Operator.SubQueryDecomposer,
+              Operator.HyDE,
+              Operator.Grader,
+              Operator.HallucinationDetector,
+              Operator.RetryController,
             ]}
             isCustomDropdown={isCustomDropdown}
             mousePosition={mousePosition}

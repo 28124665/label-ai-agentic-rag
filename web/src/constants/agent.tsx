@@ -123,6 +123,13 @@ export enum Operator {
   LoopStart = 'LoopItem',
   ExitLoop = 'ExitLoop',
   ExcelProcessor = 'ExcelProcessor',
+  // Phase 2 RAG Enhancement Components
+  Grader = 'Grader',
+  HallucinationDetector = 'HallucinationDetector',
+  QueryRewriter = 'QueryRewriter',
+  SubQueryDecomposer = 'SubQueryDecomposer',
+  HyDE = 'HyDE',
+  RetryController = 'RetryController',
 }
 
 export enum ComparisonOperator {
@@ -227,6 +234,122 @@ export enum AgentDialogueMode {
 export const initialBeginValues = {
   mode: AgentDialogueMode.Conversational,
   prologue: `Hi! I'm your assistant. What can I do for you?`,
+};
+
+// Phase 2 RAG Enhancement Components - Initial Form Values
+export const initialGraderValues = {
+  query: AgentGlobalsSysQueryWithBrace,
+  documents: '',
+  eval_mode: 'llm',
+  batch_size: 5,
+  relevance_threshold: 0.7,
+  max_eval_tokens: 2000,
+  timeout: 30,
+  max_retry_on_parse_error: 2,
+  backup_llm_model: '',
+  outputs: {
+    graded_documents: {
+      type: 'Array<Object>',
+      value: [],
+    },
+    relevant_count: {
+      type: 'integer',
+      value: 0,
+    },
+  },
+};
+
+export const initialHallucinationDetectorValues = {
+  answer: '',
+  documents: '',
+  pass_threshold: 0.85,
+  filter_threshold: 0.6,
+  regenerate_threshold: 0.3,
+  rule_weight: 0.4,
+  nli_weight: 0.4,
+  llm_weight: 0.2,
+  timeout: 30,
+  outputs: {
+    faithfulness_score: {
+      type: 'number',
+      value: 0,
+    },
+    action: {
+      type: 'string',
+      value: '',
+    },
+  },
+};
+
+export const initialQueryRewriterValues = {
+  ...initialLlmBaseValues,
+  query: AgentGlobalsSysQueryWithBrace,
+  strategy: 'synonym_rewrite',
+  use_llm_for_synonyms: false,
+  outputs: {
+    rewritten_query: {
+      type: 'string',
+      value: '',
+    },
+    complexity_type: {
+      type: 'string',
+      value: '',
+    },
+  },
+};
+
+export const initialSubQueryDecomposerValues = {
+  ...initialLlmBaseValues,
+  query: AgentGlobalsSysQueryWithBrace,
+  min_count: 2,
+  max_count: 5,
+  top_k: 10,
+  dedup_threshold: 0.92,
+  rrf_k: 60,
+  outputs: {
+    sub_queries: {
+      type: 'Array<string>',
+      value: [],
+    },
+  },
+};
+
+export const initialHyDEValues = {
+  ...initialLlmBaseValues,
+  query: AgentGlobalsSysQueryWithBrace,
+  enable_hyde: false,
+  hyde_prompt: '',
+  temperature: 0.3,
+  max_tokens: 256,
+  outputs: {
+    hyde_query: {
+      type: 'string',
+      value: '',
+    },
+  },
+};
+
+export const initialRetryControllerValues = {
+  has_relevant: 'sys.has_relevant',
+  relevant_count: 'sys.relevant_count',
+  retry_count: 'sys.retry_count',
+  accumulated_retry_tokens: 'sys.accumulated_retry_tokens',
+  max_retries: 3,
+  max_retry_tokens: 2000,
+  min_relevant_docs: 2,
+  is_chitchat: 'sys.is_chitchat',
+  web_search_fallback_triggered: 'sys.web_search_fallback_triggered',
+  strategy: 'sys.selected_strategy',
+  outputs: {
+    should_retry: {
+      type: 'boolean',
+      value: false,
+    },
+    stop_reason: {
+      type: 'string',
+      value: '',
+    },
+  },
 };
 
 export const BeginId = 'begin';

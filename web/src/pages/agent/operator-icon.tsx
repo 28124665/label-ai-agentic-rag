@@ -34,6 +34,13 @@ export const OperatorIconMap = {
   [Operator.ListOperations]: 'a-listoperations',
   [Operator.VariableAssigner]: 'a-ariableassigner',
   [Operator.VariableAggregator]: 'aggregator',
+  // Phase 2 RAG Enhancement Components
+  [Operator.Grader]: 'a-QuestionClassification',
+  [Operator.HallucinationDetector]: 'a-QuestionClassification',
+  [Operator.QueryRewriter]: 'a-textprocessing',
+  [Operator.SubQueryDecomposer]: 'a-textprocessing',
+  [Operator.HyDE]: 'a-textprocessing',
+  [Operator.RetryController]: 'condition',
 };
 
 export const SVGIconMap = {
