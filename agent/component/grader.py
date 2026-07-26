@@ -36,25 +36,38 @@ from common.token_utils import num_tokens_from_string
 对应需求：P2-FR-03（Grader 检索结果评估）
 
 功能说明：
-  对检索返回的文档进行相关性评估，过滤不相关文档，提高生成答案的质量。
-  支持多种评估模式，并在评估失败时提供多级降级策略。
+  在 Retrieval 组件的 Rerank（Cross-Encoder）之后，对检索返回的文档进行
+  更深层次的语义评估，过滤不相关文档，提高生成答案的质量。
+
+  Rerank 解决的是"排序"问题（谁更相关），Grader 解决的是"判断"问题（谁能不能用）。
+  Rerank 基于 Cross-Encoder 的语义相似度分数无法区分"语义相似但不能回答"
+  和"语义相似且能回答"的文档，Grader 通过 LLM/NLI 进行深层语义判断来弥补这一不足。
 
 实现方式：
-  1. 三种评估模式：
-     - llm：使用 LLM 对文档进行语义相关性判断（最准确，成本最高）
-     - cross_encoder：使用 Cross-Encoder/Rerank 模型计算相似度分数（快速，无需 LLM）
-     - local_nli：使用 NLI（自然语言推理）风格的 prompt 进行蕴含判断
-  2. 批量评估：将文档按 batch_size 分批发送给 LLM，减少调用次数。
+  1. 两种评估模式（Rerank 之后）：
+     - llm（LLM-as-Judge）：使用 LLM 对文档进行语义相关性判断
+       适合复杂查询、多文档 QA，精度最高
+     - local_nli（NLI）：使用 NLI（自然语言推理）风格的 prompt 进行蕴含判断
+       适合事实性查询（查数据、查指标），判断文档是否蕴含答案
+  2. Rerank 分数降级：
+     当 LLM/NLI 调用失败时，自动复用检索阶段已有的 Rerank 分数（rerank_score）
+     进行阈值过滤，零额外延迟和成本。
+  3. 批量评估：将文档按 batch_size 分批发送给 LLM，减少调用次数。
      每批文档的总 token 数不超过 max_eval_tokens。
-  3. 长文档处理：超过 max_eval_tokens 的文档按语义段落（双换行）拆分，
+  4. 长文档处理：超过 max_eval_tokens 的文档按语义段落（双换行）拆分，
      再按句子边界进一步切分，确保每个 chunk 不超过 token 限制。
-  4. 多级降级策略：
+  5. 多级降级策略：
      - LLM 调用超时 -> 使用 Rerank 分数降级
      - JSON 解析失败 -> 重试 max_retry_on_parse_error 次
      - 配额超限 -> 切换到 backup_llm_model
      - 服务不可用 -> 降级为 Rerank 分数或标记全部相关
-  5. 结果聚合：同一文档的多个 chunk 评估结果取最高分。
-  6. 可观测性：记录评估耗时、命中率、降级原因等指标和结构化日志。
+  6. 结果聚合：同一文档的多个 chunk 评估结果取最高分。
+  7. 可观测性：记录评估耗时、命中率、降级原因等指标和结构化日志。
+
+设计说明：
+  已移除 cross_encoder 作为主动评估模式。原因是 Grader 在 Retrieval 之后执行，
+  Retrieval 内部已调用 Rerank（Cross-Encoder）完成重排序，如果 Grader 再次调用
+  Cross-Encoder 属于冗余计算。Rerank 分数已作为降级方案保留。
 """
 
 
@@ -115,21 +128,23 @@ class GraderParam(ComponentParamBase):
     """Grader 组件参数定义。
 
     关键参数说明：
-      - evaluator_model: 评估模式（llm/cross_encoder/local_nli）
+      - evaluator_model: 评估模式（llm/local_nli）
+        已移除 cross_encoder 模式，因为 Grader 在 Rerank 之后执行，
+        再次调用 Cross-Encoder 属于冗余计算。Rerank 分数作为降级方案保留。
       - batch_size: 每批评估的文档数量（最大不超过 max_batch_size）
       - max_eval_tokens: 单次 LLM 调用的最大 token 数（含 prompt 和文档）
       - timeout_seconds: LLM 调用超时时间
       - fallback_on_failure: 评估失败时是否降级（True=使用 Rerank 分数，False=标记全部相关）
       - max_retry_on_parse_error: JSON 解析失败时的重试次数
       - backup_llm_model: 主模型配额超限时使用的备用模型
-      - relevance_threshold: Cross-Encoder 模式下判定相关的分数阈值
+      - relevance_threshold: 降级时判定相关的分数阈值（用于 Rerank 分数降级）
     """
 
     def __init__(self):
         super().__init__()
         self.query = "sys.query"
         self.retrieved_docs = "sys.retrieved_docs"
-        self.evaluator_model = "llm"  # llm | cross_encoder | local_nli
+        self.evaluator_model = "llm"  # llm | local_nli
         self.batch_size = 5
         self.max_batch_size = 10
         self.max_eval_tokens = 2000
@@ -139,7 +154,6 @@ class GraderParam(ComponentParamBase):
         self.backup_llm_model = None
         self.relevance_threshold = 0.5
         self.llm_id = ""
-        self.rerank_model_id = ""
         self.prompt = ""
         self.nli_prompt = ""
 
@@ -149,7 +163,7 @@ class GraderParam(ComponentParamBase):
         self.check_valid_value(
             self.evaluator_model,
             "[Grader] evaluator_model",
-            ["llm", "cross_encoder", "local_nli"],
+            ["llm", "local_nli"],
         )
         self.check_positive_integer(self.batch_size, "[Grader] batch_size")
         self.check_positive_integer(self.max_batch_size, "[Grader] max_batch_size")
@@ -160,8 +174,8 @@ class GraderParam(ComponentParamBase):
         self.check_decimal_float(float(self.relevance_threshold), "[Grader] relevance_threshold")
         if self.batch_size > self.max_batch_size:
             raise ValueError("[Grader] batch_size can not exceed max_batch_size")
-        if self.evaluator_model == "llm":
-            self.check_empty(self.llm_id, "[Grader] llm_id")
+        # Both llm and local_nli modes require llm_id
+        self.check_empty(self.llm_id, "[Grader] llm_id")
 
 
 class Grader(ComponentBase, ABC):
@@ -209,8 +223,6 @@ class Grader(ComponentBase, ABC):
         evaluator = self._param.evaluator_model
         if evaluator == "llm":
             graded = await self._evaluate_with_llm(query, docs)
-        elif evaluator == "cross_encoder":
-            graded = await self._evaluate_with_cross_encoder(query, docs)
         else:  # local_nli
             graded = await self._evaluate_with_local_nli(query, docs)
 
@@ -355,20 +367,6 @@ class Grader(ComponentBase, ABC):
         from api.db.services.llm_service import LLMBundle
 
         config = get_model_config_by_type_and_name(self._canvas.get_tenant_id(), LLMType.CHAT, model_id)
-        return LLMBundle(self._canvas.get_tenant_id(), config)
-
-    def _create_rerank_bundle(self, model_id: str = ""):
-        from api.db.joint_services.tenant_model_service import (
-            get_model_config_by_type_and_name,
-            get_tenant_default_model_by_type,
-        )
-        from api.db.services.llm_service import LLMBundle
-
-        if not model_id:
-            default_config = get_tenant_default_model_by_type(self._canvas.get_tenant_id(), LLMType.RERANK)
-            model_id = default_config["llm_name"]
-
-        config = get_model_config_by_type_and_name(self._canvas.get_tenant_id(), LLMType.RERANK, model_id)
         return LLMBundle(self._canvas.get_tenant_id(), config)
 
     async def _llm_evaluate(
@@ -629,33 +627,6 @@ class Grader(ComponentBase, ABC):
                 }
             )
         return self._merge_graded_docs(docs, results, graded_by=graded_by)
-
-    # ------------------------------------------------------------------
-    # Cross-encoder evaluator
-    # ------------------------------------------------------------------
-    async def _evaluate_with_cross_encoder(self, query: str, docs: list[dict]) -> list[dict]:
-        try:
-            rerank_mdl = self._create_rerank_bundle(self._param.rerank_model_id)
-            texts = [self._doc_text_for_eval(d) for d in docs]
-            scores, _ = await asyncio.wait_for(
-                asyncio.to_thread(rerank_mdl.similarity, query, texts),
-                timeout=self._param.timeout_seconds,
-            )
-        except Exception as e:
-            logging.warning(f"[Grader] Cross-encoder evaluation failed: {e}")
-            return self._handle_failure(docs, f"cross_encoder_error: {e}")
-
-        results = []
-        for doc, score in zip(docs, scores):
-            results.append(
-                {
-                    "index": doc["index"],
-                    "relevance": RELEVANT if score >= self._param.relevance_threshold else NOT_RELEVANT,
-                    "score": float(score),
-                    "reason": "Cross-encoder similarity score",
-                }
-            )
-        return self._merge_graded_docs(docs, results, graded_by="cross_encoder")
 
     # ------------------------------------------------------------------
     # Fallback helpers

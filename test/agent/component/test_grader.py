@@ -99,13 +99,11 @@ def sample_docs():
 def patch_llm_deps():
     # Patch the bundle factory methods on Grader so the tests do not need to
     # import the real model service stack.
-    with patch.object(Grader, "_create_llm_bundle") as mock_create_llm, patch.object(Grader, "_create_rerank_bundle") as mock_create_rerank:
+    with patch.object(Grader, "_create_llm_bundle") as mock_create_llm:
         bundle = MagicMock()
         bundle.async_chat = AsyncMock(return_value="[]")
-        bundle.similarity = MagicMock(return_value=([], 0))
         mock_create_llm.return_value = bundle
-        mock_create_rerank.return_value = bundle
-        yield mock_create_llm, bundle, mock_create_rerank
+        yield mock_create_llm, bundle, None
 
 
 @pytest.fixture(autouse=True)
@@ -286,21 +284,6 @@ class TestGraderLLMEvaluation:
 
 
 class TestGraderOtherEvaluators:
-    def test_cross_encoder_evaluation(self, mock_canvas, sample_docs, patch_llm_deps):
-        _, bundle, _ = patch_llm_deps
-        bundle.similarity.return_value = ([0.95, 0.05], 0)
-        mock_canvas.globals["sys.retrieved_docs"] = sample_docs
-
-        param = make_param(evaluator_model="cross_encoder", rerank_model_id="rerank_model")
-        grader = Grader(mock_canvas, "grader_0", param)
-        grader.invoke()
-
-        graded = grader.output("graded_docs")
-        assert graded[0]["relevance"] == "relevant"
-        assert graded[0]["graded_by"] == "cross_encoder"
-        assert graded[0]["score"] == pytest.approx(0.95)
-        assert graded[1]["relevance"] == "not_relevant"
-
     def test_local_nli_evaluation(self, mock_canvas, sample_docs, patch_llm_deps):
         _, bundle, _ = patch_llm_deps
         bundle.async_chat.return_value = json.dumps(
