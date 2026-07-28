@@ -1,0 +1,76 @@
+"""
+数据库连接管理模块
+负责：
+1. 创建数据库引擎和会话
+2. 提供异步数据库会话依赖
+3. 管理数据库连接生命周期
+"""
+
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase
+from typing import AsyncGenerator
+import logging
+
+from core.config import settings
+
+logger = logging.getLogger(__name__)
+
+# 创建异步引擎
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    echo=settings.DEBUG,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20
+)
+
+# 创建异步会话工厂
+async_session = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False
+)
+
+
+class Base(DeclarativeBase):
+    """SQLAlchemy 声明式基类"""
+    pass
+
+
+async def init_db():
+    """初始化数据库（创建表）"""
+    try:
+        # 导入所有模型以确保它们被注册
+        
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables created successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        raise
+
+
+async def close_db():
+    """关闭数据库连接"""
+    await engine.dispose()
+    logger.info("Database engine disposed")
+
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """
+    获取数据库会话依赖（用于 FastAPI 的 Depends）
+    
+    使用示例：
+        @router.get("/items")
+        async def get_items(db: AsyncSession = Depends(get_db)):
+            ...
+    """
+    async with async_session() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()

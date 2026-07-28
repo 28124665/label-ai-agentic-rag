@@ -228,6 +228,9 @@ bin/
 internal/cpp/cmake-build-release/
 internal/cpp/cmake-build-debug/!/node.pkg
 
+# mcp-db-server is a standalone repository, managed in its own git tree
+mcp-db-server/
+
 !/node.tar.gz
 !/.nvm/
 !/docker/.env.prod

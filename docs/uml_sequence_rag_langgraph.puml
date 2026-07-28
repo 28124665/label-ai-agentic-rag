@@ -1,0 +1,197 @@
+@startuml
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+title Agentic RAG LangGraph 流程 - 用户提问到返回答案
+
+actor User
+participant "API Entry\n(api/apps/conversation_app)" as API
+participant "LangGraphRunner\n(agent/langgraph/runner.py)" as Runner
+participant "Compiled Graph\n(agent/langgraph/graph.py)" as Graph
+participant "AgentState\n(agent/langgraph/state.py)" as State
+
+box "LangGraph 编排节点" #LightBlue
+    participant "user_question_node\n(nodes/user_question.py)" as UQ
+    participant "intent_router_node\n(nodes/intent_router.py)" as IR
+    participant "quality_check_node\n(nodes/quality_check.py)" as QC
+    participant "prompt_assembly_node\n(nodes/prompt_assembly.py)" as PA
+    participant "llm_generate_node\n(nodes/llm_generate.py)" as LLM
+    participant "hallucination_node\n(nodes/hallucination.py)" as HD
+    participant "observability_node\n(nodes/observability.py)" as OBS
+    participant "final_answer_node\n(nodes/final_answer.py)" as FA
+end box
+
+box "LangGraph 工具封装" #LightGreen
+    participant "RAGTool\n(agent/langgraph/tools/rag_tool.py)" as RAG
+    participant "DatabaseTool\n(agent/langgraph/tools/database_tool.py)" as DB
+    participant "WebTool\n(agent/langgraph/tools/web_tool.py)" as Web
+end box
+
+box "RAGFlow 内部组件" #LightYellow
+    participant "preprocess_query\n(api/utils/query_preprocessor.py)" as QP
+    participant "settings.retriever.retrieval\n(rag/retrieval)" as Retriever
+    participant "get_model_config_by_type_and_name\n(api/db/joint_services)" as ModelConfig
+    participant "LLMBundle\n(api/db/services/llm_service.py)" as LLMBundle
+end box
+
+== 1. 入口与图编译 ==
+User -> API: 提交问题
+API -> Runner: run(user_question, query_lang, tenant_id, llm_id, kb_ids, db_id)
+note right: 初始化 LangGraph 工作流
+
+Runner -> Graph: build_and_compile_agent_graph()
+note right: 构建并编译 StateGraph
+Graph --> Runner: compiled_graph
+
+Runner -> State: 初始化 AgentState
+note right: 写入 user_question、query_lang、tenant_id、llm_id、kb_ids、db_id、retry_count=0
+
+Runner -> Graph: compiled.invoke(initial_state)
+
+== 2. 用户问题入口节点 ==
+Graph -> UQ: user_question_node(state)
+note right: 检测语言，初始化 trace_id、retry_count、max_retries
+UQ --> Graph: {query_lang, trace_id, retry_count, max_retries}
+
+== 3. 意图路由节点 ==
+Graph -> IR: intent_router_node(state)
+note right: 根据关键词判断意图
+IR -> IR: _route_intent(query)
+note right: 聚合词/实体 -> database；概念词 -> rag；混合 -> hybrid；其他 -> chitchat
+IR --> Graph: {route_target}
+
+Graph -> IR: route_decision(state)
+IR --> Graph: 下一节点名称
+
+alt route_target == "rag"
+    == 4a. RAG Tool 调用 ==
+    Graph -> RAG: RAGTool.invoke(input_data)
+    note right: 输入 {query, query_lang, top_k, kb_ids, tenant_id}
+
+    RAG -> QP: preprocess_query(query)
+    note right: 语言检测 + 繁简转换，返回 query_simplified
+
+    RAG -> RAG: _retrieve(query, kb_ids, tenant_id, top_k, ...)
+    note right: 混合检索（BM25 + 向量）
+    RAG -> ModelConfig: get_model_config_by_type_and_name(tenant_id, EMBEDDING, embd_id)
+    RAG -> LLMBundle: LLMBundle(tenant_id, embd_model_config)
+    RAG -> Retriever: settings.retriever.retrieval(...)
+    Retriever --> RAG: kbinfos (chunks + doc_aggs)
+
+    RAG -> RAG: _evaluate_quality(chunks)
+    note right: 基于 similarity 分数计算 quality_score、has_relevant、relevant_count
+    RAG -> RAG: _format_docs(chunks)
+    note right: 格式化为 {content, score, source, chunk_id, doc_id}
+    RAG --> Graph: RAGToolOutput {docs, quality_score, has_relevant, ...}
+
+else route_target == "database"
+    == 4b. Database Tool 调用 ==
+    Graph -> DB: DatabaseTool.invoke(input_data)
+    note right: 输入 {query, query_lang, db_id, tenant_id, mcp_server_name}
+
+    DB -> DB: _load_db_config(config_path)
+    note right: 从 conf/db_schema.yaml 加载数据库白名单
+    DB -> DB: _init_mcp_session(tenant_id, mcp_server_name)
+    note right: 通过 MCP Server 获取 query_*/list_tables_*/describe_table_* 工具列表
+    DB -> DB: _validate_database(db_id)
+    note right: 确认 query_{db_id} 工具存在
+
+    DB -> DB: _list_tables(db_id)
+    note right: 渐进式 Schema 发现第一步：获取表名清单
+    DB -> DB: _describe_table(db_id, table_name)
+    note right: 渐进式 Schema 发现第二步：获取字段详情
+
+    DB -> DB: _generate_sql_placeholder(query, db_id, table_schemas)
+    note right: TODO: 模板匹配 / NL-to-SQL 生成 SQL
+    DB -> DB: _validate_sql(sql)
+    note right: 只读校验：必须以 SELECT/WITH 开头，拦截危险关键词
+
+    DB -> DB: _execute_sql(db_id, sql)
+    note right: 通过 MCP query_{db_id} 执行 SQL
+    DB -> DB: _evaluate_quality(rows)
+    note right: 有结果则 quality_score=1.0，否则 0.0
+    DB --> Graph: DatabaseToolOutput {sql, rows, row_count, source, quality_score}
+
+else route_target == "web" or fallback
+    == 4c. Web Tool 调用（降级） ==
+    Graph -> Web: WebTool.invoke(input_data)
+    note right: 输入 {query, query_lang, search_engine, max_results, api_key}
+
+    Web -> Web: _search_tavily(...) or _search_duckduckgo(...)
+    note right: 调用外部搜索引擎
+    Web --> Graph: WebToolOutput {docs, urls, result_count}
+end
+
+== 5. 质量检查与重试/降级决策 ==
+Graph -> QC: quality_check_node(state)
+note right: 根据 quality_score 决定 pass / retry / fallback
+QC -> QC: _make_decision(quality_score, has_relevant, retry_count, max_retries, route_target)
+note right: score >= 0.7 且有相关结果 -> pass；retry_count < max_retries -> 重试；否则 -> web 降级
+QC --> Graph: {quality_decision}
+
+Graph -> QC: quality_check_decision(state)
+QC --> Graph: 下一节点：prompt_assembly / rag_tool / db_tool / web_tool
+
+alt quality_decision == "retry_rag"
+    Graph -> RAG: RAGTool.invoke(...) [重试]
+else quality_decision == "retry_db"
+    Graph -> DB: DatabaseTool.invoke(...) [重试]
+else quality_decision == "fallback_web"
+    Graph -> Web: WebTool.invoke(...) [降级]
+end
+
+== 6. Prompt 组装 ==
+Graph -> PA: prompt_assembly_node(state)
+note right: 融合 RAG 文档、数据库结果、Web 搜索结果
+PA -> PA: _format_rag_context(rag_docs)
+PA -> PA: _format_db_context(db_result)
+PA -> PA: _format_web_context(web_docs)
+PA -> PA: _build_prompt(user_question, merged_context, query_lang, route_target)
+note right: 注入语言输出指令，构建最终 Prompt
+PA --> Graph: {merged_context, final_prompt}
+
+== 7. LLM 生成答案 ==
+Graph -> LLM: llm_generate_node(state)
+LLM -> LLM: _get_chat_model(tenant_id, llm_id)
+note right: 从租户配置获取 Chat 模型
+LLM -> LLMBundle: chat_mdl.async_chat("", history, {temperature, max_tokens})
+LLMBundle --> LLM: generated_answer
+LLM --> Graph: {generated_answer}
+
+== 8. 幻觉检测 ==
+Graph -> HD: hallucination_node(state)
+note right: 验证答案忠实度
+HD -> HD: _verify_faithfulness(answer, context, query)
+note right: TODO: 三层验证（规则 + NLI + LLM），当前为字符重叠度简化版
+HD -> HD: _dispose(faithfulness_score)
+note right: >=0.85 pass；0.6-0.85 filter；0.3-0.6 regenerate；<0.3 reject
+HD --> Graph: {hallucination_score, hallucination_action}
+
+Graph -> HD: hallucination_decision(state)
+HD --> Graph: 下一节点：observability / prompt_assembly / final_answer
+
+alt hallucination_action == "regenerate"
+    Graph -> PA: prompt_assembly_node(state) [重新生成]
+    Graph -> LLM: llm_generate_node(state)
+    Graph -> HD: hallucination_node(state)
+end
+
+== 9. 可观测性记录 ==
+Graph -> OBS: observability_node(state)
+note right: 记录 e2e_latency、各节点耗时、质量评分、幻觉评分
+OBS -> OBS: metrics.record_e2e_latency(...)
+OBS -> OBS: log_trace(...)
+OBS --> Graph: {node_timings}
+
+== 10. 最终答案 ==
+Graph -> FA: final_answer_node(state)
+FA -> FA: _get_rejection_message(query_lang) [reject 时]
+FA -> FA: _get_conservative_answer(merged_context, query_lang) [regenerate 时]
+FA --> Graph: {final_answer}
+
+Graph --> Runner: final_state
+Runner --> API: final_state
+API --> User: 返回答案
+
+@enduml
