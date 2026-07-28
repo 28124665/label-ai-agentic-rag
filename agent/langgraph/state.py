@@ -19,7 +19,23 @@
 确保状态传递的类型安全和可追溯性。
 """
 
-from typing import Literal, TypedDict
+from typing import Annotated, Literal, TypedDict
+
+
+def merge_timings(left: dict | None, right: dict | None) -> dict:
+    """LangGraph reducer for ``node_timings``.
+
+    By default LangGraph replaces dict fields on partial state updates,
+    which would discard previous nodes' timings. This reducer merges
+    the incoming timing dict into the existing one so that all node
+    timings accumulate across the graph execution.
+    """
+    merged: dict[str, float] = {}
+    if left:
+        merged.update(left)
+    if right:
+        merged.update(right)
+    return merged
 
 
 class AgentState(TypedDict, total=False):
@@ -94,4 +110,13 @@ class AgentState(TypedDict, total=False):
 
     # 可观测性
     trace_id: str
-    node_timings: dict  # {node_name: latency_ms}
+    node_timings: Annotated[dict, merge_timings]  # {node_name: latency_ms}
+
+    # 对话历史（供 prompt_assembly 注入 LLM 上下文）
+    conversation_history: list[dict]  # [{role: "user"|"assistant", content: str}]
+
+    # Agent 配置（工具参数，从 DB agent 配置传入）
+    agent_config: dict  # {tools_config, routing_config, degradation_config, model_config}
+
+    # 图执行起始时间戳（供 observability 计算端到端耗时）
+    graph_start_time: float

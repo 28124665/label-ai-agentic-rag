@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from agent.langgraph.state import AgentState
+from agent.langgraph.state import AgentState, merge_timings
 
 
 class TestAgentState:
@@ -233,3 +233,68 @@ class TestAgentState:
         assert state["hallucination_score"] == 0.5
         assert state["retry_count"] == 0
         assert state["max_retries"] == 10
+
+    # ----- 新增字段测试 -----
+
+    def test_state_conversation_history_field(self):
+        """Test conversation_history field for prompt context injection."""
+        history = [
+            {"role": "user", "content": "什么是 RAG？"},
+            {"role": "assistant", "content": "RAG 是检索增强生成..."},
+        ]
+        state: AgentState = {"conversation_history": history}
+
+        assert len(state["conversation_history"]) == 2
+        assert state["conversation_history"][0]["role"] == "user"
+        assert state["conversation_history"][1]["content"].startswith("RAG")
+
+    def test_state_agent_config_field(self):
+        """Test agent_config field for tool parameter injection."""
+        config = {
+            "tools_config": {"tools": ["rag", "database"], "kb_ids": ["kb1"]},
+            "model_config": {"llm_id": "gpt-4"},
+        }
+        state: AgentState = {"agent_config": config}
+
+        assert state["agent_config"]["tools_config"]["tools"] == ["rag", "database"]
+        assert state["agent_config"]["model_config"]["llm_id"] == "gpt-4"
+
+    def test_state_graph_start_time_field(self):
+        """Test graph_start_time field for e2e latency calculation."""
+        import time
+
+        start = time.time()
+        state: AgentState = {"graph_start_time": start}
+
+        assert state["graph_start_time"] == start
+        assert isinstance(state["graph_start_time"], float)
+
+    # ----- node_timings reducer 测试（Bug C5 修复回归） -----
+
+    def test_merge_timings_accumulates_disjoint_nodes(self):
+        """reducer 应累积不同节点的 timing，而非覆盖。"""
+        timings_sequence = [
+            {"question_input": 10},
+            {"intent_router": 25},
+            {"rag_tool": 1250},
+        ]
+        accumulated: dict[str, float] = {}
+        for t in timings_sequence:
+            accumulated = merge_timings(accumulated, t)
+
+        assert accumulated == {
+            "question_input": 10,
+            "intent_router": 25,
+            "rag_tool": 1250,
+        }
+
+    def test_merge_timings_right_overrides_left_same_key(self):
+        """同一节点的 timing 应以最新值为准。"""
+        accumulated = merge_timings({"rag_tool": 100}, {"rag_tool": 200})
+        assert accumulated["rag_tool"] == 200
+
+    def test_merge_timings_handles_none_inputs(self):
+        """reducer 应容错 None 输入。"""
+        assert merge_timings(None, {"a": 1}) == {"a": 1}
+        assert merge_timings({"a": 1}, None) == {"a": 1}
+        assert merge_timings(None, None) == {}

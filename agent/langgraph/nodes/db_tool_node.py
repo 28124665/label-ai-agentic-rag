@@ -56,6 +56,10 @@ async def db_tool_node(state: AgentState) -> dict[str, Any]:
 
     db_tool = get_database_tool()
 
+    # 从 agent_config 读取数据库工具参数，保留默认值兜底
+    agent_config = state.get("agent_config", {}) or {}
+    db_config = agent_config.get("database_config", {}) or {}
+
     input_data = {
         "query": user_question,
         "query_simplified": query_simplified or user_question,
@@ -64,18 +68,14 @@ async def db_tool_node(state: AgentState) -> dict[str, Any]:
         "tenant_id": state.get("tenant_id", ""),
         "llm_id": state.get("llm_id", ""),
         "mcp_server_name": state.get("mcp_server_name", "database_mcp_server"),
-        "enable_self_healing": True,
-        "enable_template": True,
+        "enable_self_healing": db_config.get("enable_self_healing", True),
+        "enable_template": db_config.get("enable_template", True),
     }
 
     try:
         result = await db_tool.invoke(input_data)
 
-        logger.info(
-            f"[db_tool] 查询完成: rows={result.get('row_count', 0)}, "
-            f"score={result.get('quality_score', 0.0):.2f}, "
-            f"db_id={result.get('db_id', '')}"
-        )
+        logger.info(f"[db_tool] 查询完成: rows={result.get('row_count', 0)}, score={result.get('quality_score', 0.0):.2f}, db_id={result.get('db_id', '')}")
 
         return {
             "db_result": result,

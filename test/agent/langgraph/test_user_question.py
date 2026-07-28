@@ -55,6 +55,26 @@ class TestUserQuestionNode(unittest.TestCase):
         self.assertEqual(result["query_simplified"], "")
         self.assertEqual(result["route_target"], "chitchat")
 
+    def test_injects_graph_start_time(self):
+        """测试节点注入 graph_start_time 用于端到端耗时计算（Bug L3 修复）。"""
+        import time
+
+        before = time.time()
+        state: AgentState = {"user_question": "测试问题"}
+        result = user_question_node(state)
+        after = time.time()
+
+        self.assertIn("graph_start_time", result)
+        self.assertLessEqual(before, result["graph_start_time"])
+        self.assertLessEqual(result["graph_start_time"], after)
+
+    def test_empty_question_also_injects_graph_start_time(self):
+        """空输入兜底分支也应注入 graph_start_time。"""
+        state: AgentState = {"user_question": ""}
+        result = user_question_node(state)
+        self.assertIn("graph_start_time", result)
+        self.assertIsInstance(result["graph_start_time"], float)
+
 
 if __name__ == "__main__":
     unittest.main()

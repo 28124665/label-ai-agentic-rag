@@ -58,10 +58,16 @@ def observability_node(state: AgentState) -> dict[str, Any]:
     hallucination_score = state.get("hallucination_score", 0.0)
     hallucination_action = state.get("hallucination_action", "pass")
     generated_answer = state.get("generated_answer", "")
+    graph_start_time = state.get("graph_start_time")
 
-    # 计算端到端延迟
-    total_node_latency = sum(node_timings.values()) if node_timings else 0
-    e2e_latency_ms = int((time.time() - start_time) * 1000) + total_node_latency
+    # 计算端到端延迟：以 user_question_node 注入的 graph_start_time 为基准，
+    # 而非本节点的 start_time，避免仅记录到 observability 自身耗时
+    if graph_start_time:
+        e2e_latency_ms = int((time.time() - graph_start_time) * 1000)
+    else:
+        # 兜底：graph_start_time 缺失时退化为节点耗时 + 各节点累计耗时
+        total_node_latency = sum(node_timings.values()) if node_timings else 0
+        e2e_latency_ms = int((time.time() - start_time) * 1000) + total_node_latency
 
     # 记录结构化日志
     log_data = {
@@ -88,9 +94,7 @@ def observability_node(state: AgentState) -> dict[str, Any]:
 
         # 记录幻觉检测分数
         if hallucination_score > 0:
-            metrics.record_hallucination_score(
-                hallucination_score, hallucination_action
-            )
+            metrics.record_hallucination_score(hallucination_score, hallucination_action)
     except Exception as e:
         logger.warning(f"[observability] Prometheus 指标记录失败: {e}")
 

@@ -65,6 +65,7 @@ def prompt_assembly_node(state: AgentState) -> dict[str, Any]:
     db_result = state.get("db_result", {})
     web_docs = state.get("web_docs", [])
     route_target = state.get("route_target", "chitchat")
+    conversation_history = state.get("conversation_history", []) or []
 
     # 1. 构建上下文片段
     context_parts = []
@@ -81,10 +82,7 @@ def prompt_assembly_node(state: AgentState) -> dict[str, Any]:
         db_context = _format_db_context(db_result)
         if db_context:
             context_parts.append(db_context)
-            logger.info(
-                f"[prompt_assembly] 数据库结果: "
-                f"{db_result.get('row_count', 0)} 行"
-            )
+            logger.info(f"[prompt_assembly] 数据库结果: {db_result.get('row_count', 0)} 行")
 
     # 1c. Web 搜索结果上下文
     if web_docs:
@@ -102,19 +100,15 @@ def prompt_assembly_node(state: AgentState) -> dict[str, Any]:
         merged_context=merged_context,
         query_lang=query_lang,
         route_target=route_target,
+        conversation_history=conversation_history,
     )
 
-    logger.info(
-        f"[prompt_assembly] Prompt 组装完成: "
-        f"context_len={len(merged_context)}, prompt_len={len(final_prompt)}"
-    )
+    logger.info(f"[prompt_assembly] Prompt 组装完成: context_len={len(merged_context)}, prompt_len={len(final_prompt)}")
 
     return {
         "merged_context": merged_context,
         "final_prompt": final_prompt,
-        "node_timings": {
-            "prompt_assembly": int((time.time() - start_time) * 1000)
-        },
+        "node_timings": {"prompt_assembly": int((time.time() - start_time) * 1000)},
     }
 
 
@@ -215,6 +209,7 @@ def _build_prompt(
     merged_context: str,
     query_lang: str,
     route_target: str,
+    conversation_history: list[dict] | None = None,
 ) -> str:
     """构建最终 Prompt。
 
@@ -225,30 +220,78 @@ def _build_prompt(
         merged_context: 合并后的上下文
         query_lang: 查询语言
         route_target: 路由目标
+        conversation_history: 对话历史，``[{role, content}]``，
+            最近 10 条会被注入到 Prompt 中以保持上下文连贯性
 
     Returns:
         str: 最终 Prompt
     """
     # 语言输出指令
-    lang_instruction = LANGUAGE_INSTRUCTIONS.get(
-        query_lang, LANGUAGE_INSTRUCTIONS["zh_CN"]
-    )
+    lang_instruction = LANGUAGE_INSTRUCTIONS.get(query_lang, LANGUAGE_INSTRUCTIONS["zh_CN"])
+
+    # 对话历史段落（最近 10 条）
+    history_block = _format_conversation_history(conversation_history or [])
 
     if route_target == "chitchat" or not merged_context:
         # 闲聊模式或无上下文：直接回答
-        return f"{lang_instruction}\n\n用户问题：{user_question}"
+        prompt_parts = [lang_instruction]
+        if history_block:
+            prompt_parts.append("")
+            prompt_parts.append(history_block)
+        prompt_parts.append("")
+        prompt_parts.append(f"用户问题：{user_question}")
+        return "\n".join(prompt_parts)
 
     # 构建带上下文的 Prompt
     prompt_parts = [
         "你是一个智能助手，请根据以下参考资料回答用户问题。",
         "如果参考资料中没有相关信息，请诚实告知，不要编造答案。",
         f"{lang_instruction}",
-        "",
-        merged_context,
-        "",
-        f"用户问题：{user_question}",
-        "",
-        "请基于以上参考资料给出准确、完整的回答。如果引用了参考资料，请标注来源。",
     ]
+    if history_block:
+        prompt_parts.append("")
+        prompt_parts.append(history_block)
+    prompt_parts.extend(
+        [
+            "",
+            merged_context,
+            "",
+            f"用户问题：{user_question}",
+            "",
+            "请基于以上参考资料给出准确、完整的回答。如果引用了参考资料，请标注来源。",
+        ]
+    )
 
     return "\n".join(prompt_parts)
+
+
+def _format_conversation_history(history: list[dict]) -> str:
+    """将对话历史格式化为 Prompt 段落。
+
+    仅保留最近 10 条消息，避免上下文过长。每条消息以
+    ``用户: ...`` 或 ``助手: ...`` 的形式呈现。
+
+    Args:
+        history: 对话历史列表，元素为 ``{role, content}``
+
+    Returns:
+        str: 格式化后的对话历史段落；为空时返回空字符串
+    """
+    if not history:
+        return ""
+
+    role_label = {"user": "用户", "assistant": "助手", "system": "系统"}
+    recent = history[-10:]
+    lines = ["【对话历史】"]
+    for msg in recent:
+        role = msg.get("role", "user")
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+        label = role_label.get(role, role)
+        lines.append(f"{label}: {content}")
+
+    # 仅保留至少一条有效历史时才返回段落
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines)

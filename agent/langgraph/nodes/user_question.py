@@ -44,6 +44,7 @@ def user_question_node(state: AgentState) -> dict[str, Any]:
         dict: 更新的状态字段
     """
     start_time = time.time()
+    graph_start_time = start_time
 
     user_question = state.get("user_question", "")
 
@@ -57,16 +58,14 @@ def user_question_node(state: AgentState) -> dict[str, Any]:
             "retry_count": 0,
             "max_retries": 3,
             "trace_id": str(uuid.uuid4()),
+            "graph_start_time": graph_start_time,
             "node_timings": {"question_input": int((time.time() - start_time) * 1000)},
         }
 
     query_lang, historical_lang = detect_query_language(user_question)
     query_simplified = get_query_simplified(user_question, historical_lang)
 
-    logger.info(
-        f"[user_question] 用户输入: '{user_question}', "
-        f"语言: {query_lang} ({historical_lang}), 简体: '{query_simplified}'"
-    )
+    logger.info(f"[user_question] 用户输入: '{user_question}', 语言: {query_lang} ({historical_lang}), 简体: '{query_simplified}'")
 
     return {
         "user_question": user_question,
@@ -75,5 +74,6 @@ def user_question_node(state: AgentState) -> dict[str, Any]:
         "retry_count": 0,
         "max_retries": 3,
         "trace_id": str(uuid.uuid4()),
+        "graph_start_time": graph_start_time,
         "node_timings": {"question_input": int((time.time() - start_time) * 1000)},
     }

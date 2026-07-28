@@ -61,6 +61,72 @@ class TestPromptAssemblyNode(unittest.TestCase):
         result = prompt_assembly_node(state)
         self.assertIn("供应链管理是企业竞争力的核心", result["merged_context"])
 
+    def test_injects_conversation_history_into_prompt(self):
+        """测试对话历史被注入到最终 Prompt 中。"""
+        state: AgentState = {
+            "user_question": "它有哪些最佳实践？",
+            "query_lang": "zh_CN",
+            "rag_docs": [
+                {
+                    "content": "供应链最佳实践包括...",
+                    "score": 0.9,
+                    "source": "doc1",
+                }
+            ],
+            "route_target": "rag",
+            "conversation_history": [
+                {"role": "user", "content": "什么是供应链管理？"},
+                {"role": "assistant", "content": "供应链管理是..."},
+            ],
+        }
+        result = prompt_assembly_node(state)
+        self.assertIn("【对话历史】", result["final_prompt"])
+        self.assertIn("什么是供应链管理？", result["final_prompt"])
+        self.assertIn("供应链管理是...", result["final_prompt"])
+
+    def test_chitchat_with_history_includes_history_block(self):
+        """测试闲聊模式下也注入对话历史。"""
+        state: AgentState = {
+            "user_question": "继续说说",
+            "query_lang": "zh_CN",
+            "route_target": "chitchat",
+            "conversation_history": [
+                {"role": "user", "content": "你好"},
+                {"role": "assistant", "content": "你好！有什么可以帮你？"},
+            ],
+        }
+        result = prompt_assembly_node(state)
+        self.assertIn("【对话历史】", result["final_prompt"])
+        self.assertIn("你好！有什么可以帮你？", result["final_prompt"])
+
+    def test_empty_history_omits_history_block(self):
+        """测试空对话历史不注入历史段落。"""
+        state: AgentState = {
+            "user_question": "测试",
+            "query_lang": "zh_CN",
+            "route_target": "chitchat",
+            "conversation_history": [],
+        }
+        result = prompt_assembly_node(state)
+        self.assertNotIn("【对话历史】", result["final_prompt"])
+
+    def test_history_truncated_to_recent_ten(self):
+        """测试对话历史仅保留最近 10 条。"""
+        # 构造 15 条历史
+        history = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"消息{i}"} for i in range(15)]
+        state: AgentState = {
+            "user_question": "最新问题",
+            "query_lang": "zh_CN",
+            "route_target": "chitchat",
+            "conversation_history": history,
+        }
+        result = prompt_assembly_node(state)
+        # 消息0~4 应被截断，消息5~14 应保留
+        self.assertNotIn("消息0", result["final_prompt"])
+        self.assertNotIn("消息4", result["final_prompt"])
+        self.assertIn("消息5", result["final_prompt"])
+        self.assertIn("消息14", result["final_prompt"])
+
 
 if __name__ == "__main__":
     unittest.main()

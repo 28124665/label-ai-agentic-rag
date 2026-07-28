@@ -57,26 +57,26 @@ async def rag_tool_node(state: AgentState) -> dict[str, Any]:
 
     rag_tool = get_rag_tool()
 
+    # 从 agent_config 读取 RAG 工具参数，保留默认值兜底
+    agent_config = state.get("agent_config", {}) or {}
+    rag_config = agent_config.get("rag_config", {}) or {}
+
     input_data = {
         "query": user_question,
         "query_simplified": query_simplified or user_question,
-        "top_k": 5,
-        "enable_rewrite": True,
-        "enable_rerank": True,
+        "top_k": rag_config.get("top_k", 5),
+        "enable_rewrite": rag_config.get("enable_rewrite", True),
+        "enable_rerank": rag_config.get("enable_rerank", True),
         "kb_ids": state.get("kb_ids", []),
         "tenant_id": state.get("tenant_id", ""),
         "llm_id": state.get("llm_id", ""),
-        "cross_languages": [],
+        "cross_languages": rag_config.get("cross_languages", []),
     }
 
     try:
         result = await rag_tool.invoke(input_data)
 
-        logger.info(
-            f"[rag_tool] 检索完成: docs={len(result.get('docs', []))}, "
-            f"score={result.get('quality_score', 0.0):.2f}, "
-            f"detected_lang={result.get('detected_lang', 'zh_CN')}"
-        )
+        logger.info(f"[rag_tool] 检索完成: docs={len(result.get('docs', []))}, score={result.get('quality_score', 0.0):.2f}, detected_lang={result.get('detected_lang', 'zh_CN')}")
 
         return {
             "rag_docs": result.get("docs", []),

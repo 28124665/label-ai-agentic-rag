@@ -58,6 +58,8 @@ class LangGraphRunner:
         kb_ids: Optional[list[str]] = None,
         db_id: str = "",
         mcp_server_name: str = "database_mcp_server",
+        conversation_history: Optional[list[dict]] = None,
+        agent_config: Optional[dict] = None,
         **kwargs,
     ) -> AgentState:
         """构建初始状态。"""
@@ -69,6 +71,8 @@ class LangGraphRunner:
             "kb_ids": kb_ids or [],
             "db_id": db_id,
             "mcp_server_name": mcp_server_name,
+            "conversation_history": conversation_history or [],
+            "agent_config": agent_config or {},
             "retry_count": 0,
             "max_retries": 3,
             "regenerate_count": 0,
@@ -84,6 +88,8 @@ class LangGraphRunner:
         kb_ids: Optional[list[str]] = None,
         db_id: str = "",
         mcp_server_name: str = "database_mcp_server",
+        conversation_history: Optional[list[dict]] = None,
+        agent_config: Optional[dict] = None,
         **kwargs,
     ) -> dict[str, Any]:
         """异步执行 LangGraph 工作流。
@@ -96,6 +102,8 @@ class LangGraphRunner:
             kb_ids: 知识库 ID 列表
             db_id: 数据库 ID
             mcp_server_name: MCP Server 名称
+            conversation_history: 对话历史（供 prompt_assembly 注入上下文）
+            agent_config: Agent 配置（工具参数等）
             **kwargs: 其他参数
 
         Returns:
@@ -110,6 +118,8 @@ class LangGraphRunner:
             kb_ids=kb_ids,
             db_id=db_id,
             mcp_server_name=mcp_server_name,
+            conversation_history=conversation_history,
+            agent_config=agent_config,
             **kwargs,
         )
 
@@ -117,10 +127,7 @@ class LangGraphRunner:
 
         final_state = await compiled.ainvoke(initial_state)
 
-        logger.info(
-            f"[LangGraphRunner] 执行完成: "
-            f"answer_len={len(final_state.get('final_answer', ''))}"
-        )
+        logger.info(f"[LangGraphRunner] 执行完成: answer_len={len(final_state.get('final_answer', ''))}")
 
         return final_state
 
@@ -133,6 +140,8 @@ class LangGraphRunner:
         kb_ids: Optional[list[str]] = None,
         db_id: str = "",
         mcp_server_name: str = "database_mcp_server",
+        conversation_history: Optional[list[dict]] = None,
+        agent_config: Optional[dict] = None,
         **kwargs,
     ) -> dict[str, Any]:
         """同步执行 LangGraph 工作流。
@@ -152,6 +161,8 @@ class LangGraphRunner:
                 kb_ids=kb_ids,
                 db_id=db_id,
                 mcp_server_name=mcp_server_name,
+                conversation_history=conversation_history,
+                agent_config=agent_config,
                 **kwargs,
             )
         )
@@ -165,9 +176,26 @@ class LangGraphRunner:
         kb_ids: Optional[list[str]] = None,
         db_id: str = "",
         mcp_server_name: str = "database_mcp_server",
+        conversation_history: Optional[list[dict]] = None,
+        agent_config: Optional[dict] = None,
         **kwargs,
     ):
         """异步流式执行 LangGraph 工作流。
+
+        逐节点产出 (node_name, node_output) 元组，调用方可以基于节点
+        名称将输出翻译为 SSE 事件或其它协议。
+
+        Args:
+            user_question: 用户问题
+            query_lang: 查询语言
+            tenant_id: 租户 ID
+            llm_id: LLM 模型 ID
+            kb_ids: 知识库 ID 列表
+            db_id: 数据库 ID
+            mcp_server_name: MCP Server 名称
+            conversation_history: 对话历史（供 prompt_assembly 注入上下文）
+            agent_config: Agent 配置（工具参数等）
+            **kwargs: 其他参数
 
         Yields:
             tuple: (node_name, node_output) 元组
@@ -181,6 +209,8 @@ class LangGraphRunner:
             kb_ids=kb_ids,
             db_id=db_id,
             mcp_server_name=mcp_server_name,
+            conversation_history=conversation_history,
+            agent_config=agent_config,
             **kwargs,
         )
 
@@ -200,6 +230,8 @@ class LangGraphRunner:
         kb_ids: Optional[list[str]] = None,
         db_id: str = "",
         mcp_server_name: str = "database_mcp_server",
+        conversation_history: Optional[list[dict]] = None,
+        agent_config: Optional[dict] = None,
         **kwargs,
     ):
         """同步流式执行 LangGraph 工作流。
@@ -219,6 +251,8 @@ class LangGraphRunner:
                 kb_ids=kb_ids,
                 db_id=db_id,
                 mcp_server_name=mcp_server_name,
+                conversation_history=conversation_history,
+                agent_config=agent_config,
                 **kwargs,
             )
         )
@@ -241,9 +275,7 @@ class LangGraphRunner:
         """
         compiled = self._get_compiled_graph()
         try:
-            state = await compiled.aget_state(
-                {"configurable": {"thread_id": thread_id}}
-            )
+            state = await compiled.aget_state({"configurable": {"thread_id": thread_id}})
             return state.values if hasattr(state, "values") else {}
         except Exception as e:
             logger.warning(f"[LangGraphRunner] 获取状态失败: {e}")

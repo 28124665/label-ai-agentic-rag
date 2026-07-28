@@ -53,12 +53,16 @@ async def web_tool_node(state: AgentState) -> dict[str, Any]:
 
     web_tool = get_web_tool()
 
+    # 从 agent_config 读取 Web 工具参数，保留默认值兜底
+    agent_config = state.get("agent_config", {}) or {}
+    web_config = agent_config.get("web_config", {}) or {}
+
     input_data = {
         "query": user_question,
         "query_lang": query_lang,
-        "search_engine": "tavily",
-        "max_results": 6,
-        "api_key": "",
+        "search_engine": web_config.get("search_engine", "tavily"),
+        "max_results": web_config.get("max_results", 6),
+        "api_key": web_config.get("api_key", ""),
     }
 
     try:
