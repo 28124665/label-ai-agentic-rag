@@ -34,6 +34,9 @@ async def db_tool_node(state: AgentState) -> dict[str, Any]:
     调用 DatabaseTool.invoke()，将结果写入 AgentState。
     如果 state 中未指定 db_id，DatabaseTool 会根据问题意图自动路由。
 
+    当 db_tool_enabled=False 时，本节点直接跳过（防御深度：路由层应该
+    已经拦截，节点层作为兜底，避免在某些特殊路径下被误调用）。
+
     Args:
         state: 当前 AgentState
 
@@ -41,6 +44,17 @@ async def db_tool_node(state: AgentState) -> dict[str, Any]:
         dict: 更新的状态字段
     """
     start_time = time.time()
+
+    # 能力开关：db_tool 禁用时直接跳过（防御深度）
+    if not state.get("db_tool_enabled", True):
+        logger.warning(
+            "[db_tool] db_tool 已禁用，跳过数据库查询（防御深度检查）"
+        )
+        return {
+            "db_result": {},
+            "db_quality_score": 0.0,
+            "node_timings": {"db_tool": int((time.time() - start_time) * 1000)},
+        }
 
     user_question = state.get("user_question", "")
     query_simplified = state.get("query_simplified", "")
