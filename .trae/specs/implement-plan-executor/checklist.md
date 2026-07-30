@@ -1,0 +1,26 @@
+- [x] StepArgs 模型已定义，包含 query, kb_ids, db_id, mcp_server_name, search_engine, extra 字段
+- [x] PlanStep.args 已改为 StepArgs 类型，新增 description 字段
+- [x] ToolResult TypedDict 已定义，包含 step_id, tool, success, error, rag_docs, db_result, web_docs 等字段
+- [x] AgentState 已新增 execution_plan, tool_results, plan_execution_status 字段
+- [x] DAGScheduler 已实现拓扑分层算法（_topological_layers）
+- [x] DAGScheduler 已实现并行执行（asyncio.gather）
+- [x] DAGScheduler 已实现循环依赖检测
+- [x] ToolDispatcher 已实现 _execute_rag，复用 get_rag_tool()
+- [x] ToolDispatcher 已实现 _execute_database，支持 step.args.db_id 指定数据库实例
+- [x] ToolDispatcher 已实现 _execute_web，复用 get_web_tool()
+- [x] ToolDispatcher 已实现异常捕获，失败返回 success=False
+- [x] ResultAggregator 已实现 RAG 结果合并（按 score 降序）
+- [x] ResultAggregator 已实现 DB 结果合并（标注 _source_db）
+- [x] ResultAggregator 已实现失败步骤跳过逻辑
+- [x] plan_executor_node 已实现，从 route_decision.metadata["plan"] 读取计划
+- [x] plan_executor_node 已实现降级处理（plan 不存在时不阻塞）
+- [x] plan_executor_node 已同步写入兼容字段（rag_docs, db_result, web_docs）
+- [x] route_decision() 已新增 "plan_executor" 分支
+- [x] graph.py 已注册 plan_executor 节点和边
+- [x] prompt_assembly_node 已支持多 DB 结果标注来源数据库
+- [x] planner_v1.txt 已更新为输出规范化 args
+- [x] planner.py 已更新解析新版 args 为 StepArgs 对象
+- [x] 单元测试已覆盖 DAG 调度器（拓扑分层、并行、循环依赖）
+- [x] 单元测试已覆盖工具分发器（多 DB 并行、参数优先、异常）
+- [x] 单元测试已覆盖结果聚合器（多源合并、失败隔离）
+- [x] 单元测试已覆盖计划执行器节点（正常执行、降级）
