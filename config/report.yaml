@@ -1,0 +1,75 @@
+# Report Tool 配置
+# 按 docs/报告生成Tool设计.md §10 配置设计
+
+report:
+  enabled: true
+  allowed_formats:
+    - markdown
+    - html
+  default_format: markdown
+
+  # 数量限制
+  max_sections: 10
+  max_charts: 6
+  max_tables: 8
+  max_table_rows: 100
+  max_file_size_mb: 20
+  min_evidence_count: 1
+
+  # 存储配置
+  storage_backend: local
+  storage_root: ./reports
+  download_base_url: /api/v1/reports
+  export_timeout_seconds: 60
+
+  # 安全配置
+  safety:
+    scan_sensitive_data: true
+    require_verified_evidence: true
+    allow_unverified_numbers: false
+
+  # 报告类型默认模板（可扩展）
+  templates:
+    business_analysis:
+      sections:
+        - overview
+        - key_metrics
+        - trend
+        - conclusion
+        - recommendation
+    quality_analysis:
+      sections:
+        - overview
+        - trend
+        - root_cause
+        - conclusion
+        - recommendation
+    trend_analysis:
+      sections:
+        - overview
+        - trend
+        - drivers
+        - conclusion
+    comparison:
+      sections:
+        - overview
+        - comparison_data
+        - analysis
+        - conclusion
+    knowledge_summary:
+      sections:
+        - overview
+        - key_points
+        - deep_dive
+        - conclusion
+    management_briefing:
+      sections:
+        - executive_summary
+        - key_findings
+        - risks
+        - recommendation
+
+  # 下载安全
+  download:
+    require_auth: true
+    url_expire_seconds: 600

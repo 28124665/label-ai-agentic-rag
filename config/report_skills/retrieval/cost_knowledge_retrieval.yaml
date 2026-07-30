@@ -1,0 +1,101 @@
+skill_id: cost_knowledge_retrieval
+skill_type: retrieval
+version: "1.0"
+name: 成本分析知识检索 Skill
+description: 指导成本分析所需成本口径、降本方法、采购与质量成本知识检索
+enabled: true
+linked_report_skill_id: cost_analysis
+
+rag_targets:
+  - target_id: cost_policy
+    kb_id: cost_policy_kb
+    purpose: 检索成本口径、预算规则、成本分摊规范
+    required: true
+    top_k: 6
+    query_templates:
+      - template_id: cost_kpi_definition
+        query: "成本偏差率 单位成本 质量成本口径"
+        required_for_sections: [overview, cost_structure]
+      - template_id: cost_allocation_rule
+        query: "制造成本分摊规则 人工成本口径"
+        required_for_sections: [manufacturing_cost, labor_cost]
+    document_filters:
+      doc_type: [finance_policy, kpi_definition, cost_standard]
+      status: [active]
+    metadata_filters:
+      tenant_id: "{tenant_id}"
+
+  - target_id: cost_reduction_case
+    kb_id: cost_reduction_case_kb
+    purpose: 检索降本案例、采购降本方法、质量成本改善案例
+    required: false
+    top_k: 8
+    query_templates:
+      - template_id: material_cost_reduction
+        query: "物料成本降本案例 {material_id}"
+        required_for_sections: [actions]
+      - template_id: quality_cost_reduction
+        query: "质量成本 COPQ 改善案例"
+        required_for_sections: [quality_cost, actions]
+    document_filters:
+      doc_type: [case_study, best_practice, procurement_strategy]
+    metadata_filters:
+      tenant_id: "{tenant_id}"
+
+web_targets: []
+
+evidence_requirements:
+  - evidence_id: cost_policy_refs
+    evidence_type: rag_docs
+    source_target_id: cost_policy
+    required: true
+    min_docs: 1
+    required_for_sections: [overview, cost_structure, manufacturing_cost]
+  - evidence_id: cost_reduction_refs
+    evidence_type: rag_docs
+    source_target_id: cost_reduction_case
+    required: false
+    min_docs: 0
+    required_for_sections: [actions]
+
+retrieval_policy:
+  require_tenant_filter: true
+  allow_web_fallback: false
+  min_rag_quality_score: 0.6
+  max_docs_per_section: 4
+  dedupe_by: [doc_id, chunk_hash]
+  citation_required: true
+
+query_context_requirements:
+  required_context: [tenant_id, time_range]
+  optional_context: [factory_id, product_id, material_id, cost_category]
+
+section_binding:
+  overview:
+    required_targets: [cost_policy]
+  cost_structure:
+    required_targets: [cost_policy]
+  manufacturing_cost:
+    required_targets: [cost_policy]
+  labor_cost:
+    required_targets: [cost_policy]
+  material_cost:
+    required_targets: [cost_policy]
+  quality_cost:
+    required_targets: [cost_reduction_case]
+  cost_drivers:
+    required_targets: [cost_policy]
+  actions:
+    required_targets: [cost_policy, cost_reduction_case]
+  conclusion:
+    required_targets: []
+
+validation_rules:
+  - rule_id: cost_kpi_requires_policy
+    description: 成本指标必须有成本口径 Evidence
+    section_id: overview
+    required_evidence: [cost_policy_refs]
+  - rule_id: reduction_should_reference_case
+    description: 降本建议优先引用降本案例 Evidence
+    section_id: actions
+    warning_if_missing: [cost_reduction_refs]

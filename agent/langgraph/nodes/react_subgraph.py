@@ -179,6 +179,7 @@ async def react_subgraph_node(state: AgentState) -> dict[str, Any]:
             mcp_server_name=mcp_server_name,
             query_lang=query_lang,
             llm_callable=llm_callable,
+            skill_set=state.get("skill_set"),
         )
     except Exception as e:
         logger.error(f"[{node_name}] ReAct 子图执行异常: {e}", exc_info=True)

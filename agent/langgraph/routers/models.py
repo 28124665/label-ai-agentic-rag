@@ -84,7 +84,7 @@ class PlanStep(BaseModel):
     """
 
     step_id: str
-    tool: Literal["rag", "database", "web"]
+    tool: Literal["rag", "database", "web", "report"]
     args: StepArgs = Field(default_factory=StepArgs)
     depends_on: list[str] = Field(default_factory=list)
     can_parallel: bool = False

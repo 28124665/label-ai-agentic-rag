@@ -1,0 +1,152 @@
+# 意图路由配置文件
+# 支持热更新：修改后无需重启服务即可生效
+
+# 第0层：前置过滤配置
+pre_filter:
+  enabled: true
+  security_check: true
+  external_search_check: true
+  greeting_check: true
+  entity_format_check: true
+
+# 第1层：规则路由配置
+rule_router:
+  enabled: true
+  keywords:
+    # 数据库偏向词（查询数据、统计、聚合）
+    db_bias:
+      - 多少
+      - 总额
+      - 总
+      - 占比
+      - 排名
+      - top
+      - 环比
+      - 同比
+      - 最大值
+      - 最小值
+      - 统计
+      - 汇总
+      - 平均
+      - 求和
+      - 总计
+      - 计算
+      - 查询数据
+      - 数据量
+      - 查询
+      - 数据
+      - 产线
+      - oee
+      - 销售额
+      - 业绩
+      - 产量
+      - 对比
+      - 质量
+      - 异常
+      - total
+      - sum
+      - average
+      - count
+    
+    # RAG 偏向词（查询定义、概念、解释）
+    rag_bias:
+      - 定义
+      - 解释
+      - 含义
+      - 区别
+      - 联系
+      - 影响
+      - 原因
+      - 背景
+      - 什么是
+      - 是什么
+      - 如何
+      - 为什么
+      - 怎么
+      - 请问
+      - 概念
+      - 原理
+      - 方法
+      - 流程
+      - what
+      - how
+      - why
+      - explain
+    
+    # 外部范围词（触发 Web 搜索）
+    external_scope:
+      - 网上
+      - 百度
+      - 谷歌
+      - 外部
+      - 全网
+      - 互联网
+      - 外网
+      - 搜索引擎
+    
+    # 时效性关键词（触发 Web 搜索）
+    freshness_keywords:
+      - 今天
+      - 最新
+      - 实时
+      - current
+      - latest
+      - trending
+      - 现在
+      - 当前
+      - 刚刚
+    
+    # 历史关键词（与时效性词互斥）
+    historical_keywords:
+      - 去年
+      - 历史
+      - 往年
+      - 过去
+      - 以前
+      - 之前
+      - 上年
+      - 上季度
+  
+  # 置信度阈值
+  confidence:
+    high: 0.8
+    medium: 0.6
+    low: 0.4
+
+# 第2层：LLM 语义路由配置
+llm_router:
+  enabled: true
+  tenant_id: ""  # 从 agent_config 中动态获取，留空表示使用默认租户
+  model_id: qwen3.5-9b
+  prompt_version: v1
+  timeout_ms: 500
+  max_retries: 1
+  
+  # 熔断器配置
+  circuit_breaker:
+    failure_threshold: 3
+    recovery_timeout_s: 60
+  
+  # 置信度阈值
+  confidence_thresholds:
+    direct_adopt: 0.75
+    adopt_with_label: 0.6
+    needs_clarification: 0.6
+
+# 第3层：Planner 复杂任务规划配置
+planner:
+  enabled: true
+  tenant_id: ""  # 从 agent_config 中动态获取，留空表示使用默认租户
+  model_id: qwen3.6-27b
+  prompt_version: v1
+  timeout_ms: 5000
+  max_steps: 10
+
+# 全局阈值配置
+thresholds:
+  # 规则路由置信度低于此值时，触发 LLM 路由
+  rule_to_llm: 0.7
+  # LLM 路由复杂度达到此值时，触发 Planner
+  llm_to_planner: 0.8
+  # 置信度低于此值时，需要用户澄清
+  needs_clarification: 0.6

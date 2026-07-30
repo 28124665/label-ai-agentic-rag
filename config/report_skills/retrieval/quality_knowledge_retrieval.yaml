@@ -1,0 +1,102 @@
+skill_id: quality_knowledge_retrieval
+skill_type: retrieval
+version: "1.0"
+name: 质量报告知识检索 Skill
+description: 指导质量报告所需知识库检索范围、查询模板、文档过滤与章节证据要求
+enabled: true
+linked_report_skill_id: quality_report
+
+rag_targets:
+  - target_id: quality_sop
+    kb_id: quality_sop_kb
+    purpose: 检索质量管理制度、异常处理流程、纠正预防措施规范
+    required: true
+    top_k: 6
+    query_templates:
+      - template_id: quality_exception_process
+        query: "质量异常处理流程 {exception_type}"
+        required_for_sections: [corrective_action]
+      - template_id: corrective_action_standard
+        query: "质量异常纠正预防措施 {root_cause_category}"
+        required_for_sections: [corrective_action]
+    document_filters:
+      doc_type: [sop, quality_standard]
+      status: [active]
+    metadata_filters:
+      tenant_id: "{tenant_id}"
+
+  - target_id: quality_history
+    kb_id: quality_history_kb
+    purpose: 检索历史异常案例、8D 报告、根因分析案例
+    required: false
+    top_k: 8
+    query_templates:
+      - template_id: historical_exception_case
+        query: "历史质量异常案例 {exception_type}"
+        required_for_sections: [root_cause]
+      - template_id: eight_d_reference
+        query: "8D 报告 {product_name} {exception_type}"
+        required_for_sections: [root_cause, corrective_action]
+    document_filters:
+      doc_type: [8d_report, case_study, quality_review]
+    metadata_filters:
+      tenant_id: "{tenant_id}"
+
+web_targets: []
+
+evidence_requirements:
+  - evidence_id: quality_sop_refs
+    evidence_type: rag_docs
+    source_target_id: quality_sop
+    required: true
+    min_docs: 1
+    required_for_sections: [corrective_action]
+  - evidence_id: historical_case_refs
+    evidence_type: rag_docs
+    source_target_id: quality_history
+    required: false
+    min_docs: 0
+    required_for_sections: [root_cause]
+
+retrieval_policy:
+  require_tenant_filter: true
+  allow_web_fallback: false
+  min_rag_quality_score: 0.6
+  max_docs_per_section: 4
+  dedupe_by: [doc_id, chunk_hash]
+  citation_required: true
+
+query_context_requirements:
+  required_context:
+    - tenant_id
+    - time_range
+  optional_context:
+    - exception_type
+    - root_cause_category
+    - product_name
+    - factory_id
+    - line_id
+
+section_binding:
+  overview:
+    required_targets: []
+  trend:
+    required_targets: []
+  exception_distribution:
+    required_targets: []
+  root_cause:
+    required_targets: [quality_history]
+  corrective_action:
+    required_targets: [quality_sop]
+  conclusion:
+    required_targets: []
+
+validation_rules:
+  - rule_id: corrective_action_requires_sop
+    description: 纠正措施章节必须至少有一条质量规范 Evidence
+    section_id: corrective_action
+    required_evidence: [quality_sop_refs]
+  - rule_id: history_not_required_for_publish
+    description: 历史案例缺失时不阻止发布，但必须标记 warning
+    section_id: root_cause
+    warning_if_missing: [historical_case_refs]

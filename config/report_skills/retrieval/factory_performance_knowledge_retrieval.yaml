@@ -1,0 +1,95 @@
+skill_id: factory_performance_knowledge_retrieval
+skill_type: retrieval
+version: "1.0"
+name: 工厂/产线绩效知识检索 Skill
+description: 指导绩效报告所需绩效口径、瓶颈分析和改善案例知识检索
+enabled: true
+linked_report_skill_id: factory_performance
+
+rag_targets:
+  - target_id: performance_policy
+    kb_id: performance_policy_kb
+    purpose: 检索工厂绩效指标口径、排名规则、目标管理规范
+    required: true
+    top_k: 6
+    query_templates:
+      - template_id: performance_kpi_definition
+        query: "工厂绩效指标口径 OEE 达成率 FPY"
+        required_for_sections: [overview, factory_ranking]
+      - template_id: ranking_rule
+        query: "工厂产线绩效排名规则"
+        required_for_sections: [factory_ranking]
+    document_filters:
+      doc_type: [kpi_definition, policy, performance_standard]
+      status: [active]
+    metadata_filters:
+      tenant_id: "{tenant_id}"
+
+  - target_id: lean_case
+    kb_id: lean_improvement_kb
+    purpose: 检索瓶颈分析和产线改善案例
+    required: false
+    top_k: 8
+    query_templates:
+      - template_id: bottleneck_case
+        query: "产线瓶颈分析改善案例 {process_name}"
+        required_for_sections: [bottleneck, improvement]
+      - template_id: oee_improvement_case
+        query: "OEE 提升改善案例"
+        required_for_sections: [improvement]
+    document_filters:
+      doc_type: [improvement_case, best_practice, lean_standard]
+    metadata_filters:
+      tenant_id: "{tenant_id}"
+
+web_targets: []
+
+evidence_requirements:
+  - evidence_id: performance_policy_refs
+    evidence_type: rag_docs
+    source_target_id: performance_policy
+    required: true
+    min_docs: 1
+    required_for_sections: [overview, factory_ranking]
+  - evidence_id: improvement_case_refs
+    evidence_type: rag_docs
+    source_target_id: lean_case
+    required: false
+    min_docs: 0
+    required_for_sections: [bottleneck, improvement]
+
+retrieval_policy:
+  require_tenant_filter: true
+  allow_web_fallback: false
+  min_rag_quality_score: 0.6
+  max_docs_per_section: 4
+  dedupe_by: [doc_id, chunk_hash]
+  citation_required: true
+
+query_context_requirements:
+  required_context: [tenant_id, time_range]
+  optional_context: [factory_id, line_id, process_name, product_id]
+
+section_binding:
+  overview:
+    required_targets: [performance_policy]
+  factory_ranking:
+    required_targets: [performance_policy]
+  exception_factory:
+    required_targets: []
+  bottleneck:
+    required_targets: [lean_case]
+  improvement:
+    required_targets: [lean_case]
+  conclusion:
+    required_targets: []
+
+validation_rules:
+  - rule_id: ranking_requires_policy
+    description: 排名章节必须有绩效口径或排名规则 Evidence
+    section_id: factory_ranking
+    required_evidence: [performance_policy_refs]
+  - rule_id: improvement_should_reference_case
+    description: 改善建议优先引用改善案例 Evidence
+    section_id: improvement
+    warning_if_missing: [improvement_case_refs]

@@ -1,0 +1,264 @@
+skill_id: delivery_performance
+version: "1.0"
+name: 交付绩效报告
+description: 订单准交率、延期原因、瓶颈环节
+enabled: true
+
+report_type: delivery_analysis
+intent_keywords:
+  - 交付
+  - 准交
+  - 延期
+  - 订单
+  - 履约
+  - 出货
+  - 缺料
+required_context:
+  - tenant_id
+  - time_range
+allowed_tenants: []
+required_permissions:
+  - report:generate
+  - delivery:read
+
+section_templates:
+  - section_id: overview
+    title: 一、交付总览
+    order: 1
+    required: true
+    section_type: overview
+    purpose: 汇总订单交付表现和总体风险
+    required_evidence_types: [db]
+    required_metric_ids: [delivery_on_time_rate, due_order_count, delayed_order_count]
+    min_claims: 2
+    max_claims: 5
+    allowed_claim_types: [fact, metric, comparison]
+    prompt_hint: 优先说明准交率和延期规模
+    fallback_mode: fail
+  - section_id: delay_analysis
+    title: 二、延期订单分析
+    order: 2
+    required: true
+    section_type: analysis
+    purpose: 分析延期订单分布和严重程度
+    required_evidence_types: [db]
+    required_metric_ids: [delayed_order_count, average_delay_days]
+    min_claims: 3
+    max_claims: 7
+    allowed_claim_types: [metric, comparison, trend]
+    prompt_hint: 按客户、产品、工厂或订单类型拆分
+    fallback_mode: fail
+  - section_id: delay_reason
+    title: 三、延期原因分析
+    order: 3
+    required: true
+    section_type: analysis
+    purpose: 归纳延期的主要原因和责任环节
+    required_evidence_types: [db, rag]
+    required_metric_ids: [delay_reason_distribution]
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [fact, metric]
+    prompt_hint: 原因必须来自订单状态、异常记录或制度定义
+    fallback_mode: fail
+  - section_id: bottleneck
+    title: 四、履约瓶颈环节
+    order: 4
+    required: true
+    section_type: analysis
+    purpose: 识别备料、生产、检验、出货等瓶颈环节
+    required_evidence_types: [db]
+    required_metric_ids: [fulfillment_stage_duration]
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [metric, comparison, fact]
+    prompt_hint: 对比各环节实际耗时与标准耗时
+    fallback_mode: fail
+  - section_id: risk_orders
+    title: 五、重点风险订单
+    order: 5
+    required: false
+    section_type: data
+    purpose: 列出可能延期的高价值或关键客户订单
+    required_evidence_types: [db]
+    required_metric_ids: [risk_order_list]
+    min_claims: 2
+    max_claims: 6
+    allowed_claim_types: [fact, metric]
+    prompt_hint: 敏感客户信息必须脱敏
+    fallback_mode: summary
+  - section_id: actions
+    title: 六、交付改善行动
+    order: 6
+    required: true
+    section_type: recommendation
+    purpose: 输出提升准交率的管理动作
+    required_evidence_types: [db, rag]
+    required_metric_ids: []
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [recommendation]
+    prompt_hint: 行动必须对应延期原因或瓶颈环节
+    fallback_mode: fail
+  - section_id: conclusion
+    title: 七、结论
+    order: 7
+    required: true
+    section_type: conclusion
+    purpose: 总结交付风险和下周期关注重点
+    required_evidence_types: [db]
+    required_metric_ids: [delivery_on_time_rate, delayed_order_count]
+    min_claims: 2
+    max_claims: 4
+    allowed_claim_types: [fact, recommendation]
+    prompt_hint: 不引入新订单数据
+    fallback_mode: fail
+
+core_sections:
+  - overview
+  - delay_analysis
+  - delay_reason
+  - bottleneck
+  - actions
+  - conclusion
+optional_sections:
+  - risk_orders
+
+required_evidence_types:
+  - db
+  - rag
+min_evidence_count: 4
+min_db_evidence_count: 3
+min_rag_evidence_count: 1
+evidence_filters:
+  require_structured_db_rows: true
+  allow_unverified_web: false
+
+metric_definitions:
+  - metric_id: delivery_on_time_rate
+    name: 订单准交率
+    description: 按期交付订单数与应交付订单数的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [on_time_order_count, due_order_count]
+    formula: "on_time_order_count / due_order_count * 100"
+    comparison_modes: [target, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: due_order_count
+    name: 应交付订单数
+    description: 指定周期内计划交付的订单数量
+    data_type: count
+    unit: 单
+    source_type: db
+    source_fields: [due_order_count]
+    formula: "sum(due_order_count)"
+    comparison_modes: [previous_period]
+    precision: 0
+    verification_required: true
+  - metric_id: delayed_order_count
+    name: 延期订单数
+    description: 未按计划交付的订单数量
+    data_type: count
+    unit: 单
+    source_type: db
+    source_fields: [delayed_order_count]
+    formula: "sum(delayed_order_count)"
+    comparison_modes: [previous_period]
+    precision: 0
+    verification_required: true
+  - metric_id: average_delay_days
+    name: 平均延期天数
+    description: 延期订单的平均延期天数
+    data_type: ratio
+    unit: 天
+    source_type: derived
+    source_fields: [total_delay_days, delayed_order_count]
+    formula: "total_delay_days / delayed_order_count"
+    comparison_modes: [previous_period, target]
+    precision: 2
+    verification_required: true
+  - metric_id: delay_reason_distribution
+    name: 延期原因分布
+    description: 按延期原因统计的订单数量分布
+    data_type: count
+    unit: 单
+    source_type: db
+    source_fields: [delay_reason, delayed_order_count]
+    formula: "sum(delayed_order_count) by delay_reason"
+    comparison_modes: [composition, rank]
+    precision: 0
+    verification_required: true
+  - metric_id: fulfillment_stage_duration
+    name: 履约环节耗时
+    description: 订单在备料、生产、检验、出货等环节的耗时
+    data_type: ratio
+    unit: 小时
+    source_type: db
+    source_fields: [stage_name, stage_duration_hours]
+    formula: "avg(stage_duration_hours) by stage_name"
+    comparison_modes: [standard, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: risk_order_list
+    name: 风险订单列表
+    description: 存在延期风险的订单列表
+    data_type: text
+    unit: ""
+    source_type: db
+    source_fields: [order_id, customer_id, due_date, risk_level]
+    formula: "filter(order_risk_level >= threshold)"
+    comparison_modes: [risk]
+    precision: 0
+    verification_required: true
+metric_formulas: {}
+numeric_tolerance: 0.0001
+time_granularity: month
+
+prompt_profile: delivery_performance_report
+writing_style:
+  audience: operations_and_supply_chain_management
+  tone: risk_oriented
+  language_style: concise_management
+  conclusion_first: true
+forbidden_claims:
+  - 无订单数据支撑的交付承诺
+  - 将风险订单描述为确定延期
+required_disclaimers:
+  - 风险订单基于当前订单状态和计划数据识别，实际交付结果可能随生产与物流变化。
+
+claim_rules:
+  - rule_id: delivery_metric_db_only
+    description: 交付指标必须来自结构化 DB Evidence
+    claim_types: [metric, comparison]
+    required_source_types: [db]
+  - rule_id: risk_order_requires_order_evidence
+    description: 风险订单必须绑定订单 Evidence
+    claim_types: [fact, metric]
+    required_source_types: [db]
+  - rule_id: customer_sensitive_data
+    description: 客户信息必须按权限脱敏
+    forbidden_terms: [客户完整名称, 客户联系人, 联系电话]
+section_quality_thresholds:
+  core: 0.8
+  optional: 0.7
+  minimum: 0.6
+publish_policy:
+  require_all_core_sections: true
+  allow_partial: true
+  allow_summary_only: true
+  block_on_sensitive_data: true
+
+default_format: markdown
+allowed_formats:
+  - markdown
+  - html
+export_templates:
+  markdown: delivery_performance.md.j2
+  html: delivery_performance.html.j2
+style_config:
+  theme: supply_chain
+  show_otd_card: true
+  show_delay_reason_chart: true
+  show_risk_order_table: true

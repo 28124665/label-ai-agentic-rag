@@ -32,6 +32,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
+from agent.langgraph.skills.models import ResolvedSkillSet
+from agent.langgraph.skills.policy_adapter import (
+    SkillPolicyAdapter,
+    SkillPolicyContext,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,6 +92,7 @@ class PolicyContext:
     arguments: dict = field(default_factory=dict)
     allowed_tools: list[str] = field(default_factory=list)
     agent_config: dict = field(default_factory=dict)
+    skill_set: ResolvedSkillSet | dict | None = None
 
 
 @dataclass
@@ -143,6 +150,7 @@ class PolicyGuard:
         self.allowed_tools = react_cfg.get("allowed_tools") or DEFAULT_ALLOWED_TOOLS
         # 工具级配置（如 db_query readonly）
         self.tool_policies = react_cfg.get("policy", {}) or {}
+        self.skill_policy_adapter = SkillPolicyAdapter()
 
     def evaluate(self, context: PolicyContext) -> PolicyResult:
         """评估 action 是否允许执行。
@@ -154,6 +162,10 @@ class PolicyGuard:
             PolicyResult: 决策结果
         """
         action_type = context.action_type or context.tool_name
+
+        skill_decision = self._evaluate_skill_policy(context, action_type)
+        if skill_decision is not None:
+            return skill_decision
 
         # 1. finish / ask_clarification 始终允许
         if action_type in ("finish", "ask_clarification"):
@@ -310,4 +322,48 @@ class PolicyGuard:
             decision=PolicyDecisionType.ALLOW,
             reason="RAG 工具通过策略校验",
             sanitized_arguments=args,
+        )
+
+    def _evaluate_skill_policy(
+        self, context: PolicyContext, action_type: str
+    ) -> PolicyResult | None:
+        """Apply skill constraints before the legacy tool-specific guard."""
+        if context.skill_set is None:
+            return None
+        try:
+            skill_set = (
+                context.skill_set
+                if isinstance(context.skill_set, ResolvedSkillSet)
+                else ResolvedSkillSet.model_validate(context.skill_set)
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning("Ignoring invalid skill_set in policy context: %s", exc)
+            return None
+
+        arguments = context.arguments or {}
+        permissions = context.agent_config.get("permissions", [])
+        tenant_filter_present = arguments.get("tenant_filter_present")
+        if tenant_filter_present is None:
+            tenant_filter_present = bool(arguments.get("tenant_id"))
+        skill_result = self.skill_policy_adapter.evaluate(
+            self.skill_policy_adapter.build_rules(skill_set),
+            SkillPolicyContext(
+                tenant_id=context.tenant_id,
+                permissions=permissions if isinstance(permissions, list) else [],
+                report_format=str(arguments.get("format", "")),
+                tenant_filter_present=tenant_filter_present,
+                operation=str(arguments.get("operation", action_type)),
+                requested_fields=list(arguments.get("fields", [])),
+                web_fallback_requested=bool(
+                    arguments.get("web_fallback", False)
+                    or arguments.get("use_web_fallback", False)
+                ),
+            ),
+        )
+        if skill_result.allowed:
+            return None
+        return PolicyResult(
+            decision=PolicyDecisionType.DENY,
+            reason=f"{skill_result.reason_code}: {skill_result.reason}",
+            risk_level="high",
         )

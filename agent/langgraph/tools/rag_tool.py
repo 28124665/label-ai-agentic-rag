@@ -54,6 +54,8 @@ class RAGToolInput(TypedDict, total=False):
     rerank_id: str  # Rerank 模型 ID
     cross_languages: list[str]  # 跨语言扩展目标语言列表，空列表表示不扩展
     llm_id: str  # 用于跨语言扩展的 LLM 模型 ID
+    document_filters: dict[str, Any]  # Skill 声明的文档过滤条件
+    metadata_filters: dict[str, Any]  # Skill 声明的元数据过滤条件
 
 
 class RAGToolOutput(TypedDict, total=False):
@@ -529,6 +531,9 @@ class RAGTool:
                 "source": chunk.get("docnm_kwd", "unknown"),
                 "chunk_id": chunk.get("chunk_id", ""),
                 "doc_id": chunk.get("doc_id", ""),
+                "doc_type": chunk.get("doc_type", ""),
+                "status": chunk.get("status", ""),
+                "metadata": chunk.get("metadata", {}),
             }
             docs.append(doc)
         return docs

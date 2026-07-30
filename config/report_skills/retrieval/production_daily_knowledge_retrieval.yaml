@@ -1,0 +1,92 @@
+skill_id: production_daily_knowledge_retrieval
+skill_type: retrieval
+version: "1.0"
+name: 生产日报知识检索 Skill
+description: 指导生产日报所需生产管理制度、日报规范和异常处理知识检索
+enabled: true
+linked_report_skill_id: production_daily
+
+rag_targets:
+  - target_id: production_policy
+    kb_id: production_policy_kb
+    purpose: 检索生产日报规范、生产达成率口径、停机分类标准
+    required: true
+    top_k: 5
+    query_templates:
+      - template_id: daily_report_standard
+        query: "生产日报规范 生产达成率口径"
+        required_for_sections: [daily_summary, next_actions]
+      - template_id: downtime_classification
+        query: "停机原因分类标准"
+        required_for_sections: [downtime]
+    document_filters:
+      doc_type: [policy, report_standard, kpi_definition]
+      status: [active]
+    metadata_filters:
+      tenant_id: "{tenant_id}"
+
+  - target_id: shift_handover
+    kb_id: shift_handover_kb
+    purpose: 检索班次交接和异常处理记录
+    required: false
+    top_k: 6
+    query_templates:
+      - template_id: daily_exception_handling
+        query: "当日生产异常处理 {exception_type}"
+        required_for_sections: [next_actions]
+    document_filters:
+      doc_type: [shift_report, exception_notice, meeting_minutes]
+    metadata_filters:
+      tenant_id: "{tenant_id}"
+
+web_targets: []
+
+evidence_requirements:
+  - evidence_id: production_policy_refs
+    evidence_type: rag_docs
+    source_target_id: production_policy
+    required: true
+    min_docs: 1
+    required_for_sections: [daily_summary, next_actions]
+  - evidence_id: shift_handover_refs
+    evidence_type: rag_docs
+    source_target_id: shift_handover
+    required: false
+    min_docs: 0
+    required_for_sections: [next_actions]
+
+retrieval_policy:
+  require_tenant_filter: true
+  allow_web_fallback: false
+  min_rag_quality_score: 0.55
+  max_docs_per_section: 3
+  dedupe_by: [doc_id, chunk_hash]
+  citation_required: true
+
+query_context_requirements:
+  required_context: [tenant_id, report_date]
+  optional_context: [factory_id, line_id, exception_type, downtime_reason]
+
+section_binding:
+  daily_summary:
+    required_targets: [production_policy]
+  output_by_line:
+    required_targets: []
+  downtime:
+    required_targets: [production_policy]
+  workforce:
+    required_targets: []
+  quality_exceptions:
+    required_targets: []
+  next_actions:
+    required_targets: [production_policy, shift_handover]
+
+validation_rules:
+  - rule_id: daily_summary_requires_policy
+    description: 日报摘要必须有日报规范或 KPI 口径 Evidence
+    section_id: daily_summary
+    required_evidence: [production_policy_refs]
+  - rule_id: next_actions_can_use_shift_refs
+    description: 次日关注事项可引用班次交接记录
+    section_id: next_actions
+    warning_if_missing: [shift_handover_refs]

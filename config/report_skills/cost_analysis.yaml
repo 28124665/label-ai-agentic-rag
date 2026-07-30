@@ -1,0 +1,395 @@
+skill_id: cost_analysis
+version: "1.0"
+name: 成本分析报告
+description: 制造成本、人工成本、质量成本、物料成本分析
+enabled: true
+
+report_type: cost_analysis
+intent_keywords:
+  - 成本
+  - 费用
+  - 制造成本
+  - 人工成本
+  - 物料成本
+  - 质量成本
+  - 降本
+required_context:
+  - tenant_id
+  - time_range
+allowed_tenants: []
+required_permissions:
+  - report:generate
+  - cost:read
+
+section_templates:
+  - section_id: overview
+    title: 一、成本总览
+    order: 1
+    required: true
+    section_type: overview
+    purpose: 汇总总成本、预算偏差和主要成本风险
+    required_evidence_types: [db]
+    required_metric_ids: [total_cost, cost_variance_rate, cost_per_unit]
+    min_claims: 2
+    max_claims: 5
+    allowed_claim_types: [fact, metric, comparison]
+    prompt_hint: 优先说明成本偏差和单位成本
+    fallback_mode: fail
+  - section_id: cost_structure
+    title: 二、成本结构分析
+    order: 2
+    required: true
+    section_type: data
+    purpose: 展示制造、人工、物料、质量成本构成
+    required_evidence_types: [db]
+    required_metric_ids: [cost_structure_distribution]
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [metric, comparison]
+    prompt_hint: 成本结构必须合计到总成本
+    fallback_mode: fail
+  - section_id: manufacturing_cost
+    title: 三、制造成本分析
+    order: 3
+    required: true
+    section_type: analysis
+    purpose: 分析制造成本变化和驱动因素
+    required_evidence_types: [db]
+    required_metric_ids: [manufacturing_cost, manufacturing_cost_per_unit]
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [metric, trend, comparison]
+    prompt_hint: 区分固定成本和变动成本
+    fallback_mode: fail
+  - section_id: labor_cost
+    title: 四、人工成本分析
+    order: 4
+    required: true
+    section_type: analysis
+    purpose: 分析人工成本、加班成本和效率影响
+    required_evidence_types: [db]
+    required_metric_ids: [labor_cost, overtime_cost, labor_cost_per_unit]
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [metric, comparison, trend]
+    prompt_hint: 不展示个人薪资明细
+    fallback_mode: summary
+  - section_id: material_cost
+    title: 五、物料成本分析
+    order: 5
+    required: true
+    section_type: analysis
+    purpose: 分析物料成本、采购价格变化和耗用差异
+    required_evidence_types: [db]
+    required_metric_ids: [material_cost, material_price_variance, material_usage_variance]
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [metric, comparison]
+    prompt_hint: 区分价格差异和用量差异
+    fallback_mode: fail
+  - section_id: quality_cost
+    title: 六、质量成本分析
+    order: 6
+    required: false
+    section_type: analysis
+    purpose: 分析质量失败成本和预防成本
+    required_evidence_types: [db]
+    required_metric_ids: [copq, internal_failure_cost, external_failure_cost]
+    min_claims: 2
+    max_claims: 6
+    allowed_claim_types: [metric, comparison]
+    prompt_hint: 质量成本必须与质量异常或客诉记录关联
+    fallback_mode: summary
+  - section_id: cost_drivers
+    title: 七、成本驱动因素
+    order: 7
+    required: true
+    section_type: analysis
+    purpose: 归纳成本偏差的主要来源
+    required_evidence_types: [db, rag]
+    required_metric_ids: [cost_driver_ranking]
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [fact, metric]
+    prompt_hint: 驱动因素必须量化或关联制度/价格依据
+    fallback_mode: fail
+  - section_id: actions
+    title: 八、降本建议
+    order: 8
+    required: true
+    section_type: recommendation
+    purpose: 输出可执行的降本措施
+    required_evidence_types: [db, rag]
+    required_metric_ids: []
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [recommendation]
+    prompt_hint: 降本建议必须对应成本驱动因素
+    fallback_mode: fail
+  - section_id: conclusion
+    title: 九、结论
+    order: 9
+    required: true
+    section_type: conclusion
+    purpose: 总结成本风险和管理重点
+    required_evidence_types: [db]
+    required_metric_ids: [total_cost, cost_variance_rate]
+    min_claims: 2
+    max_claims: 4
+    allowed_claim_types: [fact, recommendation]
+    prompt_hint: 结论不得引入未验证成本数字
+    fallback_mode: fail
+
+core_sections:
+  - overview
+  - cost_structure
+  - manufacturing_cost
+  - labor_cost
+  - material_cost
+  - cost_drivers
+  - actions
+  - conclusion
+optional_sections:
+  - quality_cost
+
+required_evidence_types:
+  - db
+  - rag
+min_evidence_count: 5
+min_db_evidence_count: 4
+min_rag_evidence_count: 1
+evidence_filters:
+  require_structured_db_rows: true
+  allow_unverified_web: false
+
+metric_definitions:
+  - metric_id: total_cost
+    name: 总成本
+    description: 指定周期内总成本
+    data_type: currency
+    unit: CNY
+    source_type: db
+    source_fields: [total_cost]
+    formula: "sum(total_cost)"
+    comparison_modes: [budget, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: cost_variance_rate
+    name: 成本偏差率
+    description: 实际成本与预算成本的偏差比例
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [actual_cost, budget_cost]
+    formula: "(actual_cost - budget_cost) / budget_cost * 100"
+    comparison_modes: [budget]
+    precision: 2
+    verification_required: true
+  - metric_id: cost_per_unit
+    name: 单位成本
+    description: 总成本与实际产量的比率
+    data_type: currency
+    unit: CNY/件
+    source_type: derived
+    source_fields: [total_cost, actual_output]
+    formula: "total_cost / actual_output"
+    comparison_modes: [budget, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: cost_structure_distribution
+    name: 成本结构分布
+    description: 各成本类别占总成本的比例
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [cost_category, cost_amount, total_cost]
+    formula: "cost_amount / total_cost * 100 by cost_category"
+    comparison_modes: [composition]
+    precision: 2
+    verification_required: true
+  - metric_id: manufacturing_cost
+    name: 制造成本
+    description: 制造相关成本
+    data_type: currency
+    unit: CNY
+    source_type: db
+    source_fields: [manufacturing_cost]
+    formula: "sum(manufacturing_cost)"
+    comparison_modes: [budget, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: manufacturing_cost_per_unit
+    name: 单位制造成本
+    description: 制造成本与实际产量的比率
+    data_type: currency
+    unit: CNY/件
+    source_type: derived
+    source_fields: [manufacturing_cost, actual_output]
+    formula: "manufacturing_cost / actual_output"
+    comparison_modes: [budget, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: labor_cost
+    name: 人工成本
+    description: 人工相关总成本
+    data_type: currency
+    unit: CNY
+    source_type: db
+    source_fields: [labor_cost]
+    formula: "sum(labor_cost)"
+    comparison_modes: [budget, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: overtime_cost
+    name: 加班成本
+    description: 加班产生的人工成本
+    data_type: currency
+    unit: CNY
+    source_type: db
+    source_fields: [overtime_cost]
+    formula: "sum(overtime_cost)"
+    comparison_modes: [budget, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: labor_cost_per_unit
+    name: 单位人工成本
+    description: 人工成本与实际产量的比率
+    data_type: currency
+    unit: CNY/件
+    source_type: derived
+    source_fields: [labor_cost, actual_output]
+    formula: "labor_cost / actual_output"
+    comparison_modes: [budget, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: material_cost
+    name: 物料成本
+    description: 物料采购与耗用成本
+    data_type: currency
+    unit: CNY
+    source_type: db
+    source_fields: [material_cost]
+    formula: "sum(material_cost)"
+    comparison_modes: [budget, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: material_price_variance
+    name: 物料价格差异
+    description: 实际采购价格与标准价格造成的成本差异
+    data_type: currency
+    unit: CNY
+    source_type: derived
+    source_fields: [actual_price, standard_price, actual_quantity]
+    formula: "(actual_price - standard_price) * actual_quantity"
+    comparison_modes: [standard]
+    precision: 2
+    verification_required: true
+  - metric_id: material_usage_variance
+    name: 物料用量差异
+    description: 实际用量与标准用量造成的成本差异
+    data_type: currency
+    unit: CNY
+    source_type: derived
+    source_fields: [actual_quantity, standard_quantity, standard_price]
+    formula: "(actual_quantity - standard_quantity) * standard_price"
+    comparison_modes: [standard]
+    precision: 2
+    verification_required: true
+  - metric_id: copq
+    name: 劣质成本
+    description: 内部失败和外部失败成本总和
+    data_type: currency
+    unit: CNY
+    source_type: derived
+    source_fields: [internal_failure_cost, external_failure_cost]
+    formula: "internal_failure_cost + external_failure_cost"
+    comparison_modes: [previous_period, target]
+    precision: 2
+    verification_required: true
+  - metric_id: internal_failure_cost
+    name: 内部失败成本
+    description: 厂内返工、报废等质量失败成本
+    data_type: currency
+    unit: CNY
+    source_type: db
+    source_fields: [internal_failure_cost]
+    formula: "sum(internal_failure_cost)"
+    comparison_modes: [previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: external_failure_cost
+    name: 外部失败成本
+    description: 客诉、退货、赔偿等外部质量失败成本
+    data_type: currency
+    unit: CNY
+    source_type: db
+    source_fields: [external_failure_cost]
+    formula: "sum(external_failure_cost)"
+    comparison_modes: [previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: cost_driver_ranking
+    name: 成本驱动因素排名
+    description: 按成本影响金额排序的成本驱动因素
+    data_type: text
+    unit: ""
+    source_type: db
+    source_fields: [cost_driver, cost_impact_amount]
+    formula: "rank(cost_impact_amount) by cost_driver"
+    comparison_modes: [rank]
+    precision: 0
+    verification_required: true
+metric_formulas: {}
+numeric_tolerance: 0.0001
+time_granularity: month
+
+prompt_profile: manufacturing_cost_analysis
+writing_style:
+  audience: finance_and_operations_management
+  tone: analytical
+  language_style: concise_management
+  conclusion_first: true
+forbidden_claims:
+  - 未经计算支撑的降本金额承诺
+  - 将成本节约描述为已实现利润
+required_disclaimers:
+  - 成本分析基于当前财务、生产和采购数据，正式经营决策前需与财务口径复核。
+
+claim_rules:
+  - rule_id: cost_metric_db_only
+    description: 成本指标必须来自结构化 DB Evidence
+    claim_types: [metric, comparison]
+    required_source_types: [db]
+  - rule_id: cost_formula_must_verify
+    description: 成本公式和派生指标必须经过数字一致性校验
+    claim_types: [metric]
+    require_formula_check: true
+  - rule_id: no_personal_salary_detail
+    description: 人工成本分析不得包含个人薪资明细
+    forbidden_terms: [个人薪资, 员工姓名, 身份证号]
+  - rule_id: reduction_requires_driver
+    description: 降本建议必须对应成本驱动因素
+    claim_types: [recommendation]
+    required_source_types: [db, rag]
+section_quality_thresholds:
+  core: 0.82
+  optional: 0.7
+  minimum: 0.6
+publish_policy:
+  require_all_core_sections: true
+  allow_partial: false
+  allow_summary_only: true
+  block_on_sensitive_data: true
+
+default_format: markdown
+allowed_formats:
+  - markdown
+  - html
+export_templates:
+  markdown: cost_analysis.md.j2
+  html: cost_analysis.html.j2
+style_config:
+  theme: finance_operations
+  show_cost_cards: true
+  show_cost_structure_chart: true
+  show_driver_ranking: true

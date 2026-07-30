@@ -1,0 +1,198 @@
+skill_id: production_daily_data_access
+skill_type: data
+version: "1.0"
+name: 生产日报数据访问 Skill
+description: 指导生产日报所需当日产量、停机、人力、质量异常数据查询计划
+enabled: true
+linked_report_skill_id: production_daily
+
+db_targets:
+  - target_id: mes_daily
+    db_id: mes_prod
+    purpose: 查询当日生产产量、产线达成、停机数据
+    required: true
+    tables:
+      - table_name: production_output
+        purpose: 当日生产产量
+        required: true
+        required_fields: [tenant_id, production_date, factory_id, line_id, product_id, planned_output, actual_output]
+        allowed_filters: [tenant_id, production_date, factory_id, line_id, product_id]
+        sensitive_fields: []
+      - table_name: equipment_downtime
+        purpose: 当日停机记录
+        required: true
+        required_fields: [tenant_id, downtime_date, factory_id, line_id, equipment_id, downtime_reason, downtime_minutes]
+        allowed_filters: [tenant_id, downtime_date, factory_id, line_id, equipment_id]
+        sensitive_fields: []
+  - target_id: hr_daily
+    db_id: hr_prod
+    purpose: 查询当日人力投入和出勤
+    required: true
+    tables:
+      - table_name: labor_attendance_summary
+        purpose: 当日出勤与工时
+        required: true
+        required_fields: [tenant_id, work_date, factory_id, line_id, planned_headcount, actual_headcount, actual_labor_hours, overtime_hours]
+        allowed_filters: [tenant_id, work_date, factory_id, line_id]
+        sensitive_fields: []
+  - target_id: qms_daily
+    db_id: qms_prod
+    purpose: 查询当日质量异常和一次通过率
+    required: true
+    tables:
+      - table_name: quality_exception
+        purpose: 当日质量异常
+        required: true
+        required_fields: [tenant_id, occurred_at, factory_id, line_id, product_id, exception_type, severity_level, exception_count]
+        allowed_filters: [tenant_id, occurred_at, factory_id, line_id, product_id, severity_level]
+        sensitive_fields: [customer_id]
+      - table_name: quality_inspection_result
+        purpose: 当日一次通过率
+        required: true
+        required_fields: [tenant_id, inspection_date, factory_id, line_id, product_id, input_count, first_pass_count]
+        allowed_filters: [tenant_id, inspection_date, factory_id, line_id, product_id]
+        sensitive_fields: []
+
+metric_bindings:
+  daily_planned_output:
+    source_target_id: mes_daily
+    table_name: production_output
+    aggregation: "sum(planned_output)"
+    dimensions: [production_date, factory_id, line_id]
+    filters: [tenant_id, report_date]
+  daily_actual_output:
+    source_target_id: mes_daily
+    table_name: production_output
+    aggregation: "sum(actual_output)"
+    dimensions: [production_date, factory_id, line_id]
+    filters: [tenant_id, report_date]
+  daily_achievement_rate:
+    source_type: derived
+    formula: "daily_actual_output / daily_planned_output * 100"
+    dependencies: [daily_actual_output, daily_planned_output]
+  line_output:
+    source_target_id: mes_daily
+    table_name: production_output
+    aggregation: "sum(actual_output) by line_id"
+    dimensions: [line_id]
+    filters: [tenant_id, report_date]
+  downtime_minutes:
+    source_target_id: mes_daily
+    table_name: equipment_downtime
+    aggregation: "sum(downtime_minutes)"
+    dimensions: [downtime_date, factory_id, line_id, downtime_reason]
+    filters: [tenant_id, report_date]
+  planned_headcount:
+    source_target_id: hr_daily
+    table_name: labor_attendance_summary
+    aggregation: "sum(planned_headcount)"
+    dimensions: [work_date, factory_id, line_id]
+    filters: [tenant_id, report_date]
+  actual_headcount:
+    source_target_id: hr_daily
+    table_name: labor_attendance_summary
+    aggregation: "sum(actual_headcount)"
+    dimensions: [work_date, factory_id, line_id]
+    filters: [tenant_id, report_date]
+  attendance_rate:
+    source_type: derived
+    formula: "actual_headcount / planned_headcount * 100"
+    dependencies: [actual_headcount, planned_headcount]
+  overtime_hours:
+    source_target_id: hr_daily
+    table_name: labor_attendance_summary
+    aggregation: "sum(overtime_hours)"
+    dimensions: [work_date, factory_id, line_id]
+    filters: [tenant_id, report_date]
+  daily_exception_count:
+    source_target_id: qms_daily
+    table_name: quality_exception
+    aggregation: "sum(exception_count)"
+    dimensions: [occurred_at, factory_id, line_id, exception_type]
+    filters: [tenant_id, report_date]
+  daily_fpy:
+    source_type: derived
+    formula: "first_pass_count / input_count * 100"
+    dependencies: [first_pass_count, input_count]
+
+query_templates:
+  - template_id: daily_output
+    purpose: 查询当日产量
+    target_id: mes_daily
+    table_name: production_output
+    dimensions: [production_date, factory_id, line_id]
+    metrics: [daily_planned_output, daily_actual_output]
+    filters:
+      tenant_id: "{tenant_id}"
+      production_date: "{report_date}"
+  - template_id: daily_downtime
+    purpose: 查询当日停机
+    target_id: mes_daily
+    table_name: equipment_downtime
+    dimensions: [factory_id, line_id, downtime_reason]
+    metrics: [downtime_minutes]
+    filters:
+      tenant_id: "{tenant_id}"
+      downtime_date: "{report_date}"
+  - template_id: daily_labor
+    purpose: 查询当日人力
+    target_id: hr_daily
+    table_name: labor_attendance_summary
+    dimensions: [factory_id, line_id]
+    metrics: [planned_headcount, actual_headcount, overtime_hours]
+    filters:
+      tenant_id: "{tenant_id}"
+      work_date: "{report_date}"
+  - template_id: daily_quality
+    purpose: 查询当日质量异常
+    target_id: qms_daily
+    table_name: quality_exception
+    dimensions: [factory_id, line_id, exception_type, severity_level]
+    metrics: [daily_exception_count]
+    filters:
+      tenant_id: "{tenant_id}"
+      occurred_at: "{report_date}"
+
+evidence_requirements:
+  - evidence_id: daily_output_rows
+    evidence_type: db_rows
+    source_target_id: mes_daily
+    table_name: production_output
+    required: true
+    required_for_sections: [daily_summary, output_by_line]
+  - evidence_id: daily_downtime_rows
+    evidence_type: db_rows
+    source_target_id: mes_daily
+    table_name: equipment_downtime
+    required: true
+    required_for_sections: [downtime]
+  - evidence_id: daily_labor_rows
+    evidence_type: db_rows
+    source_target_id: hr_daily
+    table_name: labor_attendance_summary
+    required: true
+    required_for_sections: [workforce]
+  - evidence_id: daily_quality_rows
+    evidence_type: db_rows
+    source_target_id: qms_daily
+    table_name: quality_exception
+    required: true
+    required_for_sections: [quality_exceptions]
+
+policy_constraints:
+  default_limit: 1000
+  max_rows: 10000
+  timeout_ms: 20000
+  allow_cross_db_join: false
+  require_tenant_filter: true
+  sensitive_field_policy:
+    customer_id: mask
+  forbidden_operations: [insert, update, delete, drop, alter, truncate]
+
+validation_rules:
+  - rule_id: report_date_required
+    description: 生产日报必须提供 report_date
+    required_context: [tenant_id, report_date]
+  - rule_id: daily_data_same_date
+    description: 所有日报数据必须使用相同 report_date
+    required_context: [report_date]

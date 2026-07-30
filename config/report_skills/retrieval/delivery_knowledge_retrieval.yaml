@@ -1,0 +1,97 @@
+skill_id: delivery_knowledge_retrieval
+skill_type: retrieval
+version: "1.0"
+name: 交付绩效知识检索 Skill
+description: 指导交付报告所需交付规则、供应链制度和改善案例知识检索
+enabled: true
+linked_report_skill_id: delivery_performance
+
+rag_targets:
+  - target_id: delivery_policy
+    kb_id: delivery_policy_kb
+    purpose: 检索订单履约规则、准交率口径、客户交付要求
+    required: true
+    top_k: 6
+    query_templates:
+      - template_id: otd_definition
+        query: "订单准交率 OTD 口径"
+        required_for_sections: [overview]
+      - template_id: customer_delivery_requirement
+        query: "客户交付要求 {customer_name}"
+        required_for_sections: [risk_orders, actions]
+    document_filters:
+      doc_type: [policy, kpi_definition, customer_requirement]
+      status: [active]
+    metadata_filters:
+      tenant_id: "{tenant_id}"
+
+  - target_id: supply_chain_case
+    kb_id: supply_chain_case_kb
+    purpose: 检索供应链延期处理和交付改善案例
+    required: false
+    top_k: 8
+    query_templates:
+      - template_id: delay_improvement_case
+        query: "订单延期改善案例 {delay_reason}"
+        required_for_sections: [actions]
+      - template_id: shortage_response_case
+        query: "缺料导致交付延期应对措施"
+        required_for_sections: [delay_reason, actions]
+    document_filters:
+      doc_type: [case_study, best_practice, sop]
+    metadata_filters:
+      tenant_id: "{tenant_id}"
+
+web_targets: []
+
+evidence_requirements:
+  - evidence_id: delivery_policy_refs
+    evidence_type: rag_docs
+    source_target_id: delivery_policy
+    required: true
+    min_docs: 1
+    required_for_sections: [overview, actions]
+  - evidence_id: supply_chain_case_refs
+    evidence_type: rag_docs
+    source_target_id: supply_chain_case
+    required: false
+    min_docs: 0
+    required_for_sections: [delay_reason, actions]
+
+retrieval_policy:
+  require_tenant_filter: true
+  allow_web_fallback: false
+  min_rag_quality_score: 0.6
+  max_docs_per_section: 4
+  dedupe_by: [doc_id, chunk_hash]
+  citation_required: true
+
+query_context_requirements:
+  required_context: [tenant_id, time_range]
+  optional_context: [customer_name, delay_reason, factory_id, product_id]
+
+section_binding:
+  overview:
+    required_targets: [delivery_policy]
+  delay_analysis:
+    required_targets: []
+  delay_reason:
+    required_targets: [supply_chain_case]
+  bottleneck:
+    required_targets: []
+  risk_orders:
+    required_targets: [delivery_policy]
+  actions:
+    required_targets: [delivery_policy, supply_chain_case]
+  conclusion:
+    required_targets: []
+
+validation_rules:
+  - rule_id: otd_requires_policy
+    description: 准交率章节必须有口径定义 Evidence
+    section_id: overview
+    required_evidence: [delivery_policy_refs]
+  - rule_id: actions_should_reference_case
+    description: 改善行动优先引用供应链案例 Evidence
+    section_id: actions
+    warning_if_missing: [supply_chain_case_refs]

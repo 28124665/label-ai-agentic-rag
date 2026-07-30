@@ -30,6 +30,11 @@ import logging
 from typing import Optional
 
 from agent.langgraph.evidence.models import Evidence
+from agent.langgraph.skills.evidence_adapter import (
+    SkillEvidenceAdapter,
+    SkillEvidenceRequirement,
+)
+from agent.langgraph.skills.models import ResolvedSkillSet
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,8 @@ HIGH_CONFIDENCE_THRESHOLD = 0.85
 def check_answerability(
     evidences: list[Evidence],
     user_question: str = "",
+    skill_set: ResolvedSkillSet | dict | None = None,
+    skill_evidence_requirements: list[dict] | None = None,
 ) -> dict:
     """判断证据是否充分回答用户问题。
 
@@ -63,7 +70,7 @@ def check_answerability(
         }
     """
     if not evidences:
-        return {
+        base_result = {
             "answerable": False,
             "coverage_score": 0.0,
             "missing_aspects": ["无任何证据"],
@@ -72,7 +79,18 @@ def check_answerability(
             "recommended_action": "ask_clarification",
             "reason": "没有任何证据，需要澄清问题或先做基础检索",
         }
+    else:
+        base_result = _check_base_answerability(evidences)
+    return _merge_skill_evidence_result(
+        base_result,
+        evidences,
+        skill_set,
+        skill_evidence_requirements,
+    )
 
+
+def _check_base_answerability(evidences: list[Evidence]) -> dict:
+    """Preserve the legacy evidence-only answerability decision."""
     # 1. 计算 coverage_score（综合权威性 + 相关性）
     if evidences:
         avg_score = sum(
@@ -152,3 +170,66 @@ def check_answerability(
         "recommended_action": "react_continue",
         "reason": f"证据相关性不足（coverage={coverage_score}），回到 ReAct 补充",
     }
+
+
+def _merge_skill_evidence_result(
+    base_result: dict,
+    evidences: list[Evidence],
+    skill_set: ResolvedSkillSet | dict | None,
+    skill_evidence_requirements: list[dict] | None,
+) -> dict:
+    """Merge declared skill evidence requirements without changing legacy calls."""
+    requirements = _resolve_skill_requirements(skill_set, skill_evidence_requirements)
+    if not requirements:
+        return base_result
+
+    skill_result = SkillEvidenceAdapter().check(requirements, evidences)
+    result = dict(base_result)
+    result.update(
+        {
+            "publish_mode": skill_result.publish_mode,
+            "missing_required_evidence": skill_result.missing_required_evidence,
+            "section_coverage": skill_result.section_coverage,
+            "skill_evidence_reason": skill_result.reason,
+        }
+    )
+    if not skill_result.answerable:
+        result.update(
+            {
+                "answerable": False,
+                "needs_more_evidence": True,
+                "recommended_action": "partial_answer",
+                "missing_aspects": list(
+                    dict.fromkeys(
+                        result.get("missing_aspects", [])
+                        + skill_result.missing_required_evidence
+                    )
+                ),
+                "reason": skill_result.reason,
+            }
+        )
+    return result
+
+
+def _resolve_skill_requirements(
+    skill_set: ResolvedSkillSet | dict | None,
+    raw_requirements: list[dict] | None,
+) -> list[SkillEvidenceRequirement]:
+    """Obtain normalized requirements from state overrides or a skill set."""
+    if raw_requirements:
+        return [
+            SkillEvidenceRequirement.model_validate(requirement)
+            for requirement in raw_requirements
+        ]
+    if skill_set is None:
+        return []
+    try:
+        resolved = (
+            skill_set
+            if isinstance(skill_set, ResolvedSkillSet)
+            else ResolvedSkillSet.model_validate(skill_set)
+        )
+    except (TypeError, ValueError) as exc:
+        logger.warning("Ignoring invalid skill_set for answerability: %s", exc)
+        return []
+    return SkillEvidenceAdapter().collect_requirements(resolved)

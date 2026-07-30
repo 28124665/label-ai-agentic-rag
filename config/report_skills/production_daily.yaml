@@ -1,0 +1,316 @@
+skill_id: production_daily
+version: "1.0"
+name: 生产日报
+description: 每日生产达成、停机、人力、质量异常
+enabled: true
+
+report_type: production_daily
+intent_keywords:
+  - 生产日报
+  - 日报
+  - 今日生产
+  - 生产达成
+  - 停机
+  - 人力
+  - 出勤
+  - 当日异常
+required_context:
+  - tenant_id
+  - report_date
+allowed_tenants: []
+required_permissions:
+  - report:generate
+  - production:read
+
+section_templates:
+  - section_id: daily_summary
+    title: 一、当日生产摘要
+    order: 1
+    required: true
+    section_type: overview
+    purpose: 汇总当日生产达成和主要异常
+    required_evidence_types: [db]
+    required_metric_ids: [daily_planned_output, daily_actual_output, daily_achievement_rate]
+    min_claims: 2
+    max_claims: 5
+    allowed_claim_types: [fact, metric, comparison]
+    prompt_hint: 使用当日日期，不得跨日期混用
+    fallback_mode: fail
+  - section_id: output_by_line
+    title: 二、产线产出情况
+    order: 2
+    required: true
+    section_type: data
+    purpose: 展示各产线产量和达成率
+    required_evidence_types: [db]
+    required_metric_ids: [line_output, line_achievement_rate]
+    min_claims: 2
+    max_claims: 8
+    allowed_claim_types: [metric, comparison]
+    prompt_hint: 重点标注未达成产线
+    fallback_mode: fail
+  - section_id: downtime
+    title: 三、停机与效率损失
+    order: 3
+    required: true
+    section_type: analysis
+    purpose: 分析停机时长和停机原因
+    required_evidence_types: [db]
+    required_metric_ids: [downtime_minutes, downtime_reason_distribution]
+    min_claims: 2
+    max_claims: 8
+    allowed_claim_types: [metric, comparison, fact]
+    prompt_hint: 停机原因必须来自设备或生产异常记录
+    fallback_mode: summary
+  - section_id: workforce
+    title: 四、人力投入情况
+    order: 4
+    required: true
+    section_type: analysis
+    purpose: 分析当日出勤、人力缺口和加班
+    required_evidence_types: [db]
+    required_metric_ids: [planned_headcount, actual_headcount, attendance_rate, overtime_hours]
+    min_claims: 2
+    max_claims: 6
+    allowed_claim_types: [metric, comparison]
+    prompt_hint: 不展示个人员工明细
+    fallback_mode: summary
+  - section_id: quality_exceptions
+    title: 五、当日质量异常
+    order: 5
+    required: true
+    section_type: analysis
+    purpose: 汇总当日质量异常和影响范围
+    required_evidence_types: [db]
+    required_metric_ids: [daily_exception_count, daily_fpy]
+    min_claims: 2
+    max_claims: 6
+    allowed_claim_types: [metric, comparison, fact]
+    prompt_hint: 区分一般异常和重大异常
+    fallback_mode: summary
+  - section_id: next_actions
+    title: 六、次日关注事项
+    order: 6
+    required: true
+    section_type: recommendation
+    purpose: 输出次日生产关注重点和协调事项
+    required_evidence_types: [db, rag]
+    required_metric_ids: []
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [recommendation]
+    prompt_hint: 关注事项必须对应当日未达标或异常
+    fallback_mode: fail
+
+core_sections:
+  - daily_summary
+  - output_by_line
+  - downtime
+  - workforce
+  - quality_exceptions
+  - next_actions
+optional_sections: []
+
+required_evidence_types:
+  - db
+  - rag
+min_evidence_count: 4
+min_db_evidence_count: 3
+min_rag_evidence_count: 1
+evidence_filters:
+  require_structured_db_rows: true
+  allow_unverified_web: false
+
+metric_definitions:
+  - metric_id: daily_planned_output
+    name: 当日计划产量
+    description: 当日计划生产数量
+    data_type: count
+    unit: 件
+    source_type: db
+    source_fields: [report_date, planned_output]
+    formula: "sum(planned_output) by report_date"
+    comparison_modes: [actual]
+    precision: 0
+    verification_required: true
+  - metric_id: daily_actual_output
+    name: 当日实际产量
+    description: 当日实际生产数量
+    data_type: count
+    unit: 件
+    source_type: db
+    source_fields: [report_date, actual_output]
+    formula: "sum(actual_output) by report_date"
+    comparison_modes: [plan, previous_day]
+    precision: 0
+    verification_required: true
+  - metric_id: daily_achievement_rate
+    name: 当日生产达成率
+    description: 当日实际产量与计划产量的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [daily_actual_output, daily_planned_output]
+    formula: "daily_actual_output / daily_planned_output * 100"
+    comparison_modes: [target, previous_day]
+    precision: 2
+    verification_required: true
+  - metric_id: line_output
+    name: 产线产量
+    description: 各产线当日实际产量
+    data_type: count
+    unit: 件
+    source_type: db
+    source_fields: [line_id, actual_output]
+    formula: "sum(actual_output) by line_id"
+    comparison_modes: [plan, peer]
+    precision: 0
+    verification_required: true
+  - metric_id: line_achievement_rate
+    name: 产线达成率
+    description: 各产线实际产量与计划产量的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [line_id, actual_output, planned_output]
+    formula: "actual_output / planned_output * 100 by line_id"
+    comparison_modes: [target, peer]
+    precision: 2
+    verification_required: true
+  - metric_id: downtime_minutes
+    name: 停机时长
+    description: 当日设备或产线停机总分钟数
+    data_type: count
+    unit: 分钟
+    source_type: db
+    source_fields: [downtime_minutes]
+    formula: "sum(downtime_minutes)"
+    comparison_modes: [previous_day, target]
+    precision: 0
+    verification_required: true
+  - metric_id: downtime_reason_distribution
+    name: 停机原因分布
+    description: 按停机原因统计的停机时长分布
+    data_type: count
+    unit: 分钟
+    source_type: db
+    source_fields: [downtime_reason, downtime_minutes]
+    formula: "sum(downtime_minutes) by downtime_reason"
+    comparison_modes: [composition, rank]
+    precision: 0
+    verification_required: true
+  - metric_id: planned_headcount
+    name: 计划人力
+    description: 当日计划投入人数
+    data_type: count
+    unit: 人
+    source_type: db
+    source_fields: [planned_headcount]
+    formula: "sum(planned_headcount)"
+    comparison_modes: [actual]
+    precision: 0
+    verification_required: true
+  - metric_id: actual_headcount
+    name: 实际人力
+    description: 当日实际投入人数
+    data_type: count
+    unit: 人
+    source_type: db
+    source_fields: [actual_headcount]
+    formula: "sum(actual_headcount)"
+    comparison_modes: [plan]
+    precision: 0
+    verification_required: true
+  - metric_id: attendance_rate
+    name: 出勤率
+    description: 实际出勤人数与计划人数的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [actual_headcount, planned_headcount]
+    formula: "actual_headcount / planned_headcount * 100"
+    comparison_modes: [target, previous_day]
+    precision: 2
+    verification_required: true
+  - metric_id: overtime_hours
+    name: 加班小时
+    description: 当日加班总小时数
+    data_type: count
+    unit: 小时
+    source_type: db
+    source_fields: [overtime_hours]
+    formula: "sum(overtime_hours)"
+    comparison_modes: [previous_day, target]
+    precision: 0
+    verification_required: true
+  - metric_id: daily_exception_count
+    name: 当日质量异常数
+    description: 当日质量异常数量
+    data_type: count
+    unit: 件
+    source_type: db
+    source_fields: [exception_count]
+    formula: "sum(exception_count)"
+    comparison_modes: [previous_day, target]
+    precision: 0
+    verification_required: true
+  - metric_id: daily_fpy
+    name: 当日一次通过率
+    description: 当日首次检验通过数量与投入数量的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [first_pass_count, input_count]
+    formula: "first_pass_count / input_count * 100"
+    comparison_modes: [target, previous_day]
+    precision: 2
+    verification_required: true
+metric_formulas: {}
+numeric_tolerance: 0.0001
+time_granularity: day
+
+prompt_profile: production_daily_report
+writing_style:
+  audience: factory_daily_management
+  tone: operational
+  language_style: concise_shift_report
+  conclusion_first: true
+forbidden_claims:
+  - 跨日期混用生产数据
+  - 无依据承诺次日恢复计划
+required_disclaimers:
+  - 本日报仅反映指定日期生产和相关系统记录，不代表完整月度绩效。
+
+claim_rules:
+  - rule_id: production_metric_db_only
+    description: 生产日报指标必须来自结构化 DB Evidence
+    claim_types: [metric, comparison]
+    required_source_types: [db]
+  - rule_id: report_date_must_match
+    description: 所有数据必须与 report_date 一致
+    required_metadata: [report_date]
+  - rule_id: no_employee_personal_data
+    description: 人力章节不得包含个人身份明细
+    forbidden_terms: [员工姓名, 身份证号, 手机号]
+section_quality_thresholds:
+  core: 0.78
+  optional: 0.7
+  minimum: 0.6
+publish_policy:
+  require_all_core_sections: true
+  allow_partial: true
+  allow_summary_only: true
+  block_on_sensitive_data: true
+
+default_format: markdown
+allowed_formats:
+  - markdown
+  - html
+export_templates:
+  markdown: production_daily.md.j2
+  html: production_daily.html.j2
+style_config:
+  theme: daily_operations
+  show_daily_kpi: true
+  show_line_table: true
+  show_exception_list: true

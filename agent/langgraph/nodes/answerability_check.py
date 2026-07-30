@@ -56,6 +56,8 @@ async def answerability_check_node(state: AgentState) -> dict[str, Any]:
     result = check_answerability(
         evidences=evidences,
         user_question=user_question,
+        skill_set=state.get("skill_set"),
+        skill_evidence_requirements=state.get("skill_evidence_requirements"),
     )
 
     logger.info(

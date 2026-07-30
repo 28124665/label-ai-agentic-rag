@@ -32,6 +32,7 @@ import logging
 import time
 from typing import Any, Optional
 
+from agent.langgraph.skills.models import ResolvedSkillSet
 from agent.langgraph.evidence.models import Evidence
 from agent.langgraph.react.budget import (
     BudgetCheckResult,
@@ -130,6 +131,7 @@ class ReactSubgraph:
         query_lang: str = "zh_CN",
         llm_callable: Optional[LLMCallable] = None,
         max_latency_ms: Optional[int] = None,
+        skill_set: ResolvedSkillSet | dict | None = None,
     ) -> ReactExecutionResult:
         """执行 ReAct 子图主循环。
 
@@ -225,6 +227,7 @@ class ReactSubgraph:
                 arguments=action.get("arguments", {}),
                 allowed_tools=allowed_tools,
                 agent_config=self.agent_config,
+                skill_set=skill_set,
             )
             policy_result = self.policy_guard.evaluate(policy_ctx)
 

@@ -132,7 +132,7 @@ class TestAgentState:
 
     def test_state_hallucination_action_variants(self):
         """Test different hallucination_action values."""
-        for action in ["pass", "filter", "regenerate", "reject"]:
+        for action in ["pass", "filter", "regenerate", "exhausted", "reject"]:
             state: AgentState = {
                 "hallucination_action": action,
             }
@@ -258,6 +258,22 @@ class TestAgentState:
 
         assert state["agent_config"]["tools_config"]["tools"] == ["rag", "database"]
         assert state["agent_config"]["model_config"]["llm_id"] == "gpt-4"
+
+    def test_state_skill_fields_accept_typed_dict_payloads(self):
+        """Skill runtime state fields should accept serializable payloads."""
+        state: AgentState = {
+            "skill_set": {"report_skill": {"skill_id": "quality_report"}},
+            "skill_resolution": {"resolved": True, "reason": "RESOLVED"},
+            "skill_plan": {"plan_id": "quality_report_plan"},
+            "skill_validation_result": {"valid": True},
+            "skill_evidence_requirements": [{"evidence_id": "production_output_rows"}],
+        }
+
+        assert state["skill_set"]["report_skill"]["skill_id"] == "quality_report"
+        assert state["skill_resolution"]["resolved"] is True
+        assert state["skill_plan"]["plan_id"] == "quality_report_plan"
+        assert state["skill_validation_result"]["valid"] is True
+        assert state["skill_evidence_requirements"][0]["evidence_id"] == "production_output_rows"
 
     def test_state_graph_start_time_field(self):
         """Test graph_start_time field for e2e latency calculation."""

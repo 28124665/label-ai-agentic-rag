@@ -1,0 +1,98 @@
+skill_id: operations_knowledge_retrieval
+skill_type: retrieval
+version: "1.0"
+name: 月度运营复盘知识检索 Skill
+description: 指导运营复盘所需管理制度、KPI 口径、改善方法知识检索
+enabled: true
+linked_report_skill_id: operations_review
+
+rag_targets:
+  - target_id: operations_policy
+    kb_id: operations_policy_kb
+    purpose: 检索运营管理制度、KPI 口径、月报规范
+    required: true
+    top_k: 6
+    query_templates:
+      - template_id: kpi_definition
+        query: "运营 KPI 口径 生产达成率 准交率 成本偏差率"
+        required_for_sections: [executive_summary, production, delivery, cost]
+      - template_id: monthly_review_standard
+        query: "月度运营复盘报告规范"
+        required_for_sections: [executive_summary, actions]
+    document_filters:
+      doc_type: [policy, kpi_definition, report_standard]
+      status: [active]
+    metadata_filters:
+      tenant_id: "{tenant_id}"
+
+  - target_id: improvement_methods
+    kb_id: lean_improvement_kb
+    purpose: 检索精益改善、瓶颈分析、效率提升方法
+    required: false
+    top_k: 8
+    query_templates:
+      - template_id: bottleneck_improvement
+        query: "生产瓶颈改善方法 {bottleneck_process}"
+        required_for_sections: [actions]
+      - template_id: delivery_improvement
+        query: "交付准交率提升方法"
+        required_for_sections: [actions]
+    document_filters:
+      doc_type: [best_practice, improvement_case, sop]
+    metadata_filters:
+      tenant_id: "{tenant_id}"
+
+web_targets: []
+
+evidence_requirements:
+  - evidence_id: kpi_definition_refs
+    evidence_type: rag_docs
+    source_target_id: operations_policy
+    required: true
+    min_docs: 1
+    required_for_sections: [executive_summary, production, delivery, cost]
+  - evidence_id: improvement_method_refs
+    evidence_type: rag_docs
+    source_target_id: improvement_methods
+    required: false
+    min_docs: 0
+    required_for_sections: [actions]
+
+retrieval_policy:
+  require_tenant_filter: true
+  allow_web_fallback: false
+  min_rag_quality_score: 0.6
+  max_docs_per_section: 4
+  dedupe_by: [doc_id, chunk_hash]
+  citation_required: true
+
+query_context_requirements:
+  required_context: [tenant_id, time_range]
+  optional_context: [factory_id, line_id, product_id, bottleneck_process]
+
+section_binding:
+  executive_summary:
+    required_targets: [operations_policy]
+  production:
+    required_targets: [operations_policy]
+  quality:
+    required_targets: []
+  delivery:
+    required_targets: [operations_policy]
+  cost:
+    required_targets: [operations_policy]
+  workforce:
+    required_targets: []
+  risks:
+    required_targets: [improvement_methods]
+  actions:
+    required_targets: [operations_policy, improvement_methods]
+
+validation_rules:
+  - rule_id: kpi_must_have_definition
+    description: 关键 KPI 必须有口径定义或制度引用
+    required_evidence: [kpi_definition_refs]
+  - rule_id: actions_should_reference_method
+    description: 行动项建议优先引用改善方法 Evidence
+    section_id: actions
+    warning_if_missing: [improvement_method_refs]

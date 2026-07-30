@@ -1,0 +1,215 @@
+skill_id: cost_data_access
+skill_type: data
+version: "1.0"
+name: 成本分析数据访问 Skill
+description: 指导制造成本、人工成本、质量成本、物料成本分析所需 DB 查询计划
+enabled: true
+linked_report_skill_id: cost_analysis
+
+db_targets:
+  - target_id: erp_cost
+    db_id: erp_prod
+    purpose: 查询总成本、制造成本、预算成本和成本结构
+    required: true
+    tables:
+      - table_name: manufacturing_cost_detail
+        purpose: 制造成本明细
+        required: true
+        required_fields: [tenant_id, cost_month, factory_id, product_id, cost_category, actual_cost, budget_cost]
+        allowed_filters: [tenant_id, cost_month, factory_id, product_id, cost_category]
+        sensitive_fields: []
+      - table_name: cost_center_summary
+        purpose: 成本中心汇总
+        required: false
+        required_fields: [tenant_id, cost_month, cost_center_id, factory_id, cost_category, actual_cost, budget_cost]
+        allowed_filters: [tenant_id, cost_month, cost_center_id, factory_id, cost_category]
+        sensitive_fields: []
+  - target_id: mes_cost
+    db_id: mes_prod
+    purpose: 查询实际产量用于单位成本计算
+    required: true
+    tables:
+      - table_name: production_output
+        purpose: 成本单位化所需产量
+        required: true
+        required_fields: [tenant_id, production_date, factory_id, product_id, actual_output]
+        allowed_filters: [tenant_id, production_date, factory_id, product_id]
+        sensitive_fields: []
+  - target_id: hr_cost
+    db_id: hr_prod
+    purpose: 查询人工成本与加班成本
+    required: true
+    tables:
+      - table_name: labor_cost_summary
+        purpose: 人工成本汇总
+        required: true
+        required_fields: [tenant_id, cost_month, factory_id, line_id, labor_cost, overtime_cost, actual_labor_hours]
+        allowed_filters: [tenant_id, cost_month, factory_id, line_id]
+        sensitive_fields: []
+  - target_id: scm_material
+    db_id: scm_prod
+    purpose: 查询物料采购价格、耗用和差异
+    required: true
+    tables:
+      - table_name: material_consumption
+        purpose: 物料耗用与成本
+        required: true
+        required_fields: [tenant_id, cost_month, factory_id, product_id, material_id, standard_quantity, actual_quantity, standard_price, actual_price]
+        allowed_filters: [tenant_id, cost_month, factory_id, product_id, material_id]
+        sensitive_fields: []
+  - target_id: qms_cost
+    db_id: qms_prod
+    purpose: 查询质量失败成本
+    required: false
+    tables:
+      - table_name: quality_failure_cost
+        purpose: 质量失败成本
+        required: false
+        required_fields: [tenant_id, cost_month, factory_id, product_id, internal_failure_cost, external_failure_cost]
+        allowed_filters: [tenant_id, cost_month, factory_id, product_id]
+        sensitive_fields: []
+
+metric_bindings:
+  total_cost:
+    source_target_id: erp_cost
+    table_name: manufacturing_cost_detail
+    aggregation: "sum(actual_cost)"
+    dimensions: [cost_month, factory_id, product_id]
+    filters: [tenant_id, time_range]
+  cost_variance_rate:
+    source_type: derived
+    formula: "(actual_cost - budget_cost) / budget_cost * 100"
+    dependencies: [actual_cost, budget_cost]
+  cost_per_unit:
+    source_type: derived
+    formula: "total_cost / actual_output"
+    dependencies: [total_cost, actual_output]
+  actual_output:
+    source_target_id: mes_cost
+    table_name: production_output
+    aggregation: "sum(actual_output)"
+    dimensions: [production_date, factory_id, product_id]
+    filters: [tenant_id, time_range]
+  manufacturing_cost:
+    source_target_id: erp_cost
+    table_name: manufacturing_cost_detail
+    aggregation: "sum(actual_cost)"
+    dimensions: [cost_month, factory_id, product_id, cost_category]
+    filters: [tenant_id, time_range, cost_category_manufacturing]
+  labor_cost:
+    source_target_id: hr_cost
+    table_name: labor_cost_summary
+    aggregation: "sum(labor_cost)"
+    dimensions: [cost_month, factory_id, line_id]
+    filters: [tenant_id, time_range]
+  overtime_cost:
+    source_target_id: hr_cost
+    table_name: labor_cost_summary
+    aggregation: "sum(overtime_cost)"
+    dimensions: [cost_month, factory_id, line_id]
+    filters: [tenant_id, time_range]
+  material_cost:
+    source_target_id: scm_material
+    table_name: material_consumption
+    aggregation: "sum(actual_quantity * actual_price)"
+    dimensions: [cost_month, factory_id, product_id, material_id]
+    filters: [tenant_id, time_range]
+  material_price_variance:
+    source_type: derived
+    formula: "(actual_price - standard_price) * actual_quantity"
+    dependencies: [actual_price, standard_price, actual_quantity]
+  material_usage_variance:
+    source_type: derived
+    formula: "(actual_quantity - standard_quantity) * standard_price"
+    dependencies: [actual_quantity, standard_quantity, standard_price]
+  copq:
+    source_type: derived
+    formula: "internal_failure_cost + external_failure_cost"
+    dependencies: [internal_failure_cost, external_failure_cost]
+  cost_driver_ranking:
+    source_target_id: erp_cost
+    table_name: manufacturing_cost_detail
+    aggregation: "rank(actual_cost - budget_cost desc)"
+    dimensions: [cost_category]
+    filters: [tenant_id, time_range]
+
+query_templates:
+  - template_id: cost_summary
+    purpose: 查询总成本和预算偏差
+    target_id: erp_cost
+    table_name: manufacturing_cost_detail
+    dimensions: [cost_month, factory_id, product_id, cost_category]
+    metrics: [actual_cost, budget_cost]
+    filters:
+      tenant_id: "{tenant_id}"
+      cost_month: "{time_range}"
+  - template_id: labor_cost
+    purpose: 查询人工成本
+    target_id: hr_cost
+    table_name: labor_cost_summary
+    dimensions: [cost_month, factory_id, line_id]
+    metrics: [labor_cost, overtime_cost, actual_labor_hours]
+    filters:
+      tenant_id: "{tenant_id}"
+      cost_month: "{time_range}"
+  - template_id: material_cost
+    purpose: 查询物料成本
+    target_id: scm_material
+    table_name: material_consumption
+    dimensions: [cost_month, factory_id, product_id, material_id]
+    metrics: [actual_quantity, actual_price, standard_quantity, standard_price]
+    filters:
+      tenant_id: "{tenant_id}"
+      cost_month: "{time_range}"
+  - template_id: quality_cost
+    purpose: 查询质量失败成本
+    target_id: qms_cost
+    table_name: quality_failure_cost
+    dimensions: [cost_month, factory_id, product_id]
+    metrics: [internal_failure_cost, external_failure_cost]
+    filters:
+      tenant_id: "{tenant_id}"
+      cost_month: "{time_range}"
+
+evidence_requirements:
+  - evidence_id: cost_rows
+    evidence_type: db_rows
+    source_target_id: erp_cost
+    table_name: manufacturing_cost_detail
+    required: true
+    required_for_sections: [overview, cost_structure, manufacturing_cost, cost_drivers]
+  - evidence_id: labor_cost_rows
+    evidence_type: db_rows
+    source_target_id: hr_cost
+    table_name: labor_cost_summary
+    required: true
+    required_for_sections: [labor_cost]
+  - evidence_id: material_cost_rows
+    evidence_type: db_rows
+    source_target_id: scm_material
+    table_name: material_consumption
+    required: true
+    required_for_sections: [material_cost]
+  - evidence_id: quality_cost_rows
+    evidence_type: db_rows
+    source_target_id: qms_cost
+    table_name: quality_failure_cost
+    required: false
+    required_for_sections: [quality_cost]
+
+policy_constraints:
+  default_limit: 3000
+  max_rows: 30000
+  timeout_ms: 60000
+  allow_cross_db_join: false
+  require_tenant_filter: true
+  sensitive_field_policy: {}
+  forbidden_operations: [insert, update, delete, drop, alter, truncate]
+
+validation_rules:
+  - rule_id: cost_requires_core_rows
+    description: 成本报告必须包含 ERP 成本、人工成本和物料成本
+    required_tables: [manufacturing_cost_detail, labor_cost_summary, material_consumption]
+  - rule_id: formula_fields_required
+    description: 成本派生指标必须包含公式依赖字段
+    required_metrics: [actual_cost, budget_cost, actual_output]

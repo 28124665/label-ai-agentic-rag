@@ -1,0 +1,25 @@
+skill_id: generic_analysis
+version: "1.0"
+name: 通用分析报告
+description: 无匹配领域 Skill 时使用的基础分析报告
+enabled: true
+
+report_type: generic_analysis
+intent_keywords: []
+required_context:
+  - tenant_id
+section_templates:
+  - section_id: overview
+    title: 分析概览
+    order: 1
+    required: true
+    section_type: overview
+    required_metric_ids: []
+core_sections:
+  - overview
+metric_definitions: []
+publish_policy:
+  allow_summary_only: true
+default_format: markdown
+allowed_formats:
+  - markdown

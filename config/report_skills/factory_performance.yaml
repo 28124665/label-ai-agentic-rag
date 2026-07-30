@@ -1,0 +1,252 @@
+skill_id: factory_performance
+version: "1.0"
+name: 工厂/产线绩效报告
+description: 工厂/产线绩效对比与异常识别
+enabled: true
+
+report_type: factory_performance
+intent_keywords:
+  - 工厂
+  - 厂区
+  - 产线
+  - 绩效
+  - 对比
+  - 排名
+  - 异常
+  - OEE
+required_context:
+  - tenant_id
+  - time_range
+allowed_tenants: []
+required_permissions:
+  - report:generate
+  - factory:read
+
+section_templates:
+  - section_id: overview
+    title: 一、绩效总览
+    order: 1
+    required: true
+    section_type: overview
+    purpose: 展示工厂或产线整体绩效结论
+    required_evidence_types: [db]
+    required_metric_ids: [factory_achievement_rate, factory_oee, factory_fpy]
+    min_claims: 2
+    max_claims: 5
+    allowed_claim_types: [fact, metric, comparison]
+    prompt_hint: 先呈现最好和最差对象
+    fallback_mode: fail
+  - section_id: factory_ranking
+    title: 二、工厂/产线排名
+    order: 2
+    required: true
+    section_type: data
+    purpose: 对比不同工厂或产线绩效
+    required_evidence_types: [db]
+    required_metric_ids: [performance_ranking]
+    min_claims: 2
+    max_claims: 6
+    allowed_claim_types: [metric, comparison]
+    prompt_hint: 排名必须基于统一指标口径
+    fallback_mode: fail
+  - section_id: exception_factory
+    title: 三、异常工厂/产线识别
+    order: 3
+    required: true
+    section_type: analysis
+    purpose: 定位低于目标或偏离均值的工厂/产线
+    required_evidence_types: [db]
+    required_metric_ids: [target_deviation_rate, performance_z_score]
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [metric, comparison, fact]
+    prompt_hint: 异常必须说明偏离幅度和指标
+    fallback_mode: fail
+  - section_id: bottleneck
+    title: 四、瓶颈环节分析
+    order: 4
+    required: true
+    section_type: analysis
+    purpose: 分析影响绩效的工序、设备或人力瓶颈
+    required_evidence_types: [db, rag]
+    required_metric_ids: [bottleneck_process_list]
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [fact, metric, recommendation]
+    prompt_hint: 瓶颈必须关联产线数据或工艺知识
+    fallback_mode: summary
+  - section_id: improvement
+    title: 五、改善建议
+    order: 5
+    required: true
+    section_type: recommendation
+    purpose: 输出针对低绩效工厂/产线的改善建议
+    required_evidence_types: [db, rag]
+    required_metric_ids: []
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [recommendation]
+    prompt_hint: 建议必须针对异常对象和瓶颈原因
+    fallback_mode: fail
+  - section_id: conclusion
+    title: 六、结论
+    order: 6
+    required: true
+    section_type: conclusion
+    purpose: 总结绩效风险和管理重点
+    required_evidence_types: [db]
+    required_metric_ids: [factory_achievement_rate, factory_oee]
+    min_claims: 2
+    max_claims: 4
+    allowed_claim_types: [fact, recommendation]
+    prompt_hint: 结论不得引入未出现的新指标
+    fallback_mode: fail
+
+core_sections:
+  - overview
+  - factory_ranking
+  - exception_factory
+  - bottleneck
+  - improvement
+  - conclusion
+optional_sections: []
+
+required_evidence_types:
+  - db
+  - rag
+min_evidence_count: 4
+min_db_evidence_count: 3
+min_rag_evidence_count: 1
+evidence_filters:
+  require_structured_db_rows: true
+  allow_unverified_web: false
+
+metric_definitions:
+  - metric_id: factory_achievement_rate
+    name: 工厂生产达成率
+    description: 工厂实际产量与计划产量的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [factory_id, actual_output, planned_output]
+    formula: "actual_output / planned_output * 100 by factory_id"
+    comparison_modes: [target, peer]
+    precision: 2
+    verification_required: true
+  - metric_id: factory_oee
+    name: 工厂 OEE
+    description: 工厂设备综合效率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [availability, performance, quality_rate]
+    formula: "availability * performance * quality_rate * 100"
+    comparison_modes: [target, peer]
+    precision: 2
+    verification_required: true
+  - metric_id: factory_fpy
+    name: 工厂一次通过率
+    description: 工厂首次检验通过数量与投入数量的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [factory_id, first_pass_count, input_count]
+    formula: "first_pass_count / input_count * 100 by factory_id"
+    comparison_modes: [target, peer]
+    precision: 2
+    verification_required: true
+  - metric_id: performance_ranking
+    name: 绩效排名
+    description: 按综合绩效指标对工厂或产线排名
+    data_type: text
+    unit: ""
+    source_type: db
+    source_fields: [factory_id, performance_score]
+    formula: "rank(performance_score) by factory_id"
+    comparison_modes: [rank]
+    precision: 0
+    verification_required: true
+  - metric_id: target_deviation_rate
+    name: 目标偏离率
+    description: 实际绩效与目标绩效的偏离比例
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [actual_value, target_value]
+    formula: "(actual_value - target_value) / target_value * 100"
+    comparison_modes: [target]
+    precision: 2
+    verification_required: true
+  - metric_id: performance_z_score
+    name: 绩效偏离分
+    description: 工厂绩效相对同类工厂均值的标准化偏离
+    data_type: ratio
+    unit: z
+    source_type: derived
+    source_fields: [actual_value, peer_mean, peer_stddev]
+    formula: "(actual_value - peer_mean) / peer_stddev"
+    comparison_modes: [peer]
+    precision: 2
+    verification_required: true
+  - metric_id: bottleneck_process_list
+    name: 瓶颈工序列表
+    description: 按拥堵或低效程度识别的瓶颈工序
+    data_type: text
+    unit: ""
+    source_type: db
+    source_fields: [process_name, cycle_time, wip_count]
+    formula: "rank(cycle_time, wip_count) by process_name"
+    comparison_modes: [rank]
+    precision: 0
+    verification_required: true
+metric_formulas: {}
+numeric_tolerance: 0.0001
+time_granularity: month
+
+prompt_profile: factory_performance_report
+writing_style:
+  audience: factory_management
+  tone: comparative
+  language_style: concise_management
+  conclusion_first: true
+forbidden_claims:
+  - 无统一口径的跨工厂排名
+  - 将短期波动描述为长期趋势
+required_disclaimers:
+  - 工厂或产线对比必须基于统一统计口径、时间范围和产量结构。
+
+claim_rules:
+  - rule_id: factory_metric_db_only
+    description: 工厂绩效指标必须来自结构化 DB Evidence
+    claim_types: [metric, comparison]
+    required_source_types: [db]
+  - rule_id: ranking_requires_same_scope
+    description: 排名必须保证时间范围、组织范围和指标口径一致
+    claim_types: [comparison]
+    required_metadata: [time_range, org_scope, metric_id]
+  - rule_id: improvement_requires_bottleneck
+    description: 改善建议必须关联异常对象或瓶颈环节
+    claim_types: [recommendation]
+    required_source_types: [db, rag]
+section_quality_thresholds:
+  core: 0.8
+  optional: 0.7
+  minimum: 0.6
+publish_policy:
+  require_all_core_sections: true
+  allow_partial: false
+  allow_summary_only: true
+  block_on_sensitive_data: true
+
+default_format: markdown
+allowed_formats:
+  - markdown
+  - html
+export_templates:
+  markdown: factory_performance.md.j2
+  html: factory_performance.html.j2
+style_config:
+  theme: manufacturing
+  show_ranking_table: true
+  show_exception_cards: true
+  show_bottleneck_list: true

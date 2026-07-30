@@ -114,6 +114,23 @@ class TestRAGTool:
         assert docs[1]["score"] == 0.8
         assert docs[1]["source"] == "doc2.pdf"
 
+    def test_format_docs_preserves_filterable_metadata(self):
+        """Skill-guided RAG post-filtering needs original document attributes."""
+        docs = RAGTool()._format_docs(
+            [
+                {
+                    "content": "active SOP",
+                    "doc_type": "sop",
+                    "status": "active",
+                    "metadata": {"tenant_id": "tenant-1"},
+                }
+            ]
+        )
+
+        assert docs[0]["doc_type"] == "sop"
+        assert docs[0]["status"] == "active"
+        assert docs[0]["metadata"] == {"tenant_id": "tenant-1"}
+
     def test_empty_result(self):
         """测试空结果返回。"""
         import time

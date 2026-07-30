@@ -1,0 +1,265 @@
+skill_id: quality_report
+version: "1.0"
+name: 质量报告
+description: 质量月报、异常趋势、根因分析、纠正措施
+enabled: true
+
+report_type: quality_analysis
+intent_keywords:
+  - 质量
+  - 品质
+  - 异常
+  - 不良
+  - 缺陷
+  - 客诉
+  - 根因
+  - 8D
+  - 良率
+required_context:
+  - tenant_id
+  - time_range
+allowed_tenants: []
+required_permissions:
+  - report:generate
+  - quality:read
+
+section_templates:
+  - section_id: overview
+    title: 一、质量总体概况
+    order: 1
+    required: true
+    section_type: overview
+    purpose: 汇总当期质量表现和总体异常水平
+    required_evidence_types: [db]
+    required_metric_ids: [exception_count, exception_rate, first_pass_yield]
+    min_claims: 2
+    max_claims: 5
+    allowed_claim_types: [fact, metric, comparison]
+    prompt_hint: 先给管理层结论，再列关键指标
+    fallback_mode: fail
+  - section_id: trend
+    title: 二、质量异常趋势
+    order: 2
+    required: true
+    section_type: trend
+    purpose: 展示质量异常数量和异常率趋势
+    required_evidence_types: [db]
+    required_metric_ids: [monthly_exception_count, exception_rate_trend]
+    min_claims: 2
+    max_claims: 6
+    allowed_claim_types: [metric, trend, comparison]
+    prompt_hint: 使用统一时间粒度描述趋势
+    fallback_mode: fail
+  - section_id: exception_distribution
+    title: 三、异常类型分布
+    order: 3
+    required: true
+    section_type: data
+    purpose: 分析主要异常类型和占比
+    required_evidence_types: [db]
+    required_metric_ids: [top_exception_types, exception_type_share]
+    min_claims: 2
+    max_claims: 6
+    allowed_claim_types: [metric, comparison]
+    prompt_hint: 重点描述 TOP 异常类型和集中度
+    fallback_mode: fail
+  - section_id: root_cause
+    title: 四、根因分析
+    order: 4
+    required: true
+    section_type: analysis
+    purpose: 归纳异常根因和责任环节
+    required_evidence_types: [db, rag]
+    required_metric_ids: [root_cause_distribution]
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [fact, metric, recommendation]
+    prompt_hint: 根因必须关联 DB 分类或 RAG 规范
+    fallback_mode: fail
+  - section_id: corrective_action
+    title: 五、纠正与预防措施
+    order: 5
+    required: true
+    section_type: recommendation
+    purpose: 输出整改和预防措施
+    required_evidence_types: [db, rag]
+    required_metric_ids: []
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [recommendation, fact]
+    prompt_hint: 每项措施必须对应根因或质量规范
+    fallback_mode: summary
+  - section_id: conclusion
+    title: 六、结论
+    order: 6
+    required: true
+    section_type: conclusion
+    purpose: 给出质量风险判断和管理重点
+    required_evidence_types: [db]
+    required_metric_ids: [exception_count, exception_rate]
+    min_claims: 2
+    max_claims: 4
+    allowed_claim_types: [fact, recommendation]
+    prompt_hint: 不引入新指标，只总结已验证结论
+    fallback_mode: fail
+
+core_sections:
+  - overview
+  - trend
+  - exception_distribution
+  - root_cause
+  - corrective_action
+  - conclusion
+optional_sections: []
+
+required_evidence_types:
+  - db
+  - rag
+min_evidence_count: 3
+min_db_evidence_count: 2
+min_rag_evidence_count: 1
+evidence_filters:
+  require_structured_db_rows: true
+  allow_unverified_web: false
+
+metric_definitions:
+  - metric_id: exception_count
+    name: 异常数量
+    description: 指定周期内的质量异常总数
+    data_type: count
+    unit: 件
+    source_type: db
+    source_fields: [exception_count]
+    formula: "sum(exception_count)"
+    comparison_modes: [previous_period, target]
+    precision: 0
+    verification_required: true
+  - metric_id: exception_rate
+    name: 异常率
+    description: 异常数量与生产数量的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [exception_count, production_count]
+    formula: "exception_count / production_count * 100"
+    comparison_modes: [previous_period, target]
+    precision: 2
+    verification_required: true
+  - metric_id: first_pass_yield
+    name: 一次通过率
+    description: 首次检验通过数量与投入数量的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [first_pass_count, input_count]
+    formula: "first_pass_count / input_count * 100"
+    comparison_modes: [previous_period, target]
+    precision: 2
+    verification_required: true
+  - metric_id: monthly_exception_count
+    name: 月度异常数量
+    description: 按月份统计的异常数量
+    data_type: count
+    unit: 件
+    source_type: db
+    source_fields: [month, exception_count]
+    formula: "sum(exception_count) by month"
+    comparison_modes: [trend]
+    precision: 0
+    verification_required: true
+  - metric_id: exception_rate_trend
+    name: 异常率趋势
+    description: 按月份统计的异常率趋势
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [month, exception_count, production_count]
+    formula: "exception_count / production_count * 100 by month"
+    comparison_modes: [trend]
+    precision: 2
+    verification_required: true
+  - metric_id: top_exception_types
+    name: TOP 异常类型
+    description: 按异常数量排序的异常类型列表
+    data_type: text
+    unit: ""
+    source_type: db
+    source_fields: [exception_type, exception_count]
+    formula: "rank(exception_count) by exception_type"
+    comparison_modes: [rank]
+    precision: 0
+    verification_required: true
+  - metric_id: exception_type_share
+    name: 异常类型占比
+    description: 各异常类型占总异常数量的比例
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [exception_type_count, total_exception_count]
+    formula: "exception_type_count / total_exception_count * 100"
+    comparison_modes: [composition]
+    precision: 2
+    verification_required: true
+  - metric_id: root_cause_distribution
+    name: 根因分布
+    description: 各根因类别的异常数量分布
+    data_type: count
+    unit: 件
+    source_type: db
+    source_fields: [root_cause_category, exception_count]
+    formula: "sum(exception_count) by root_cause_category"
+    comparison_modes: [composition, rank]
+    precision: 0
+    verification_required: true
+metric_formulas: {}
+numeric_tolerance: 0.0001
+time_granularity: month
+
+prompt_profile: manufacturing_quality_report
+writing_style:
+  audience: executive_and_quality_management
+  tone: objective
+  language_style: concise_management
+  conclusion_first: true
+forbidden_claims:
+  - 未经数据支撑的质量改善承诺
+  - 未关闭异常已完成整改
+  - 模糊描述质量显著提升
+required_disclaimers:
+  - 本报告基于当前可用质量和生产数据生成，结论仅适用于指定时间范围。
+
+claim_rules:
+  - rule_id: quality_metric_db_only
+    description: 质量指标必须来自结构化 DB Evidence
+    claim_types: [metric, comparison]
+    required_source_types: [db]
+  - rule_id: corrective_action_requires_support
+    description: 纠正措施必须关联根因或规范 Evidence
+    claim_types: [recommendation]
+    required_source_types: [db, rag]
+  - rule_id: no_unclosed_as_closed
+    description: 不得将未关闭异常描述为已整改完成
+    forbidden_terms: [已完成整改, 已关闭]
+    condition: exception_status != closed
+section_quality_thresholds:
+  core: 0.8
+  optional: 0.7
+  minimum: 0.6
+publish_policy:
+  require_all_core_sections: true
+  allow_partial: false
+  allow_summary_only: true
+  block_on_sensitive_data: true
+
+default_format: markdown
+allowed_formats:
+  - markdown
+  - html
+export_templates:
+  markdown: quality_report.md.j2
+  html: quality_report.html.j2
+style_config:
+  theme: manufacturing
+  show_kpi_cards: true
+  show_trend_charts: true
+  show_topn_tables: true

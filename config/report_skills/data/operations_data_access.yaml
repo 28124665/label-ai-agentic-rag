@@ -1,0 +1,224 @@
+skill_id: operations_data_access
+skill_type: data
+version: "1.0"
+name: 月度运营复盘数据访问 Skill
+description: 指导月度运营复盘所需生产、质量、交付、成本、人力数据查询计划
+enabled: true
+linked_report_skill_id: operations_review
+
+db_targets:
+  - target_id: mes_operations
+    db_id: mes_prod
+    purpose: 查询生产计划、实际产量、产线与工厂维度数据
+    required: true
+    tables:
+      - table_name: production_output
+        purpose: 生产计划与实际产量
+        required: true
+        required_fields: [tenant_id, production_date, factory_id, line_id, product_id, planned_output, actual_output, input_count]
+        allowed_filters: [tenant_id, production_date, factory_id, line_id, product_id]
+        sensitive_fields: []
+  - target_id: qms_operations
+    db_id: qms_prod
+    purpose: 查询质量异常与一次通过率
+    required: true
+    tables:
+      - table_name: quality_exception
+        purpose: 质量异常统计
+        required: true
+        required_fields: [tenant_id, occurred_at, factory_id, line_id, product_id, exception_type, exception_count]
+        allowed_filters: [tenant_id, occurred_at, factory_id, line_id, product_id]
+        sensitive_fields: [customer_id]
+      - table_name: quality_inspection_result
+        purpose: 一次通过率统计
+        required: true
+        required_fields: [tenant_id, inspection_date, factory_id, line_id, product_id, input_count, first_pass_count]
+        allowed_filters: [tenant_id, inspection_date, factory_id, line_id, product_id]
+        sensitive_fields: []
+  - target_id: oms_delivery
+    db_id: oms_prod
+    purpose: 查询订单交付与延期数据
+    required: true
+    tables:
+      - table_name: sales_order_delivery
+        purpose: 订单交付履约
+        required: true
+        required_fields: [tenant_id, order_id, customer_id, factory_id, product_id, due_date, delivery_date, status, delay_days]
+        allowed_filters: [tenant_id, due_date, delivery_date, factory_id, product_id, status]
+        sensitive_fields: [customer_id]
+  - target_id: erp_cost
+    db_id: erp_prod
+    purpose: 查询制造成本、预算成本和成本偏差
+    required: true
+    tables:
+      - table_name: manufacturing_cost_detail
+        purpose: 制造成本明细
+        required: true
+        required_fields: [tenant_id, cost_month, factory_id, product_id, cost_category, actual_cost, budget_cost]
+        allowed_filters: [tenant_id, cost_month, factory_id, product_id, cost_category]
+        sensitive_fields: []
+  - target_id: hr_labor
+    db_id: hr_prod
+    purpose: 查询出勤、工时和加班数据
+    required: true
+    tables:
+      - table_name: labor_attendance_summary
+        purpose: 人力出勤与工时汇总
+        required: true
+        required_fields: [tenant_id, work_date, factory_id, line_id, planned_headcount, actual_headcount, planned_labor_hours, actual_labor_hours, overtime_hours]
+        allowed_filters: [tenant_id, work_date, factory_id, line_id]
+        sensitive_fields: []
+
+metric_bindings:
+  production_achievement_rate:
+    source_type: derived
+    formula: "actual_output / planned_output * 100"
+    dependencies: [actual_output, planned_output]
+  planned_output:
+    source_target_id: mes_operations
+    table_name: production_output
+    aggregation: "sum(planned_output)"
+    dimensions: [production_date, factory_id, line_id, product_id]
+    filters: [tenant_id, time_range]
+  actual_output:
+    source_target_id: mes_operations
+    table_name: production_output
+    aggregation: "sum(actual_output)"
+    dimensions: [production_date, factory_id, line_id, product_id]
+    filters: [tenant_id, time_range]
+  quality_exception_rate:
+    source_type: derived
+    formula: "exception_count / production_count * 100"
+    dependencies: [exception_count, production_count]
+  delivery_on_time_rate:
+    source_type: derived
+    formula: "on_time_order_count / due_order_count * 100"
+    dependencies: [on_time_order_count, due_order_count]
+  on_time_order_count:
+    source_target_id: oms_delivery
+    table_name: sales_order_delivery
+    aggregation: "count(case when delay_days <= 0 then order_id end)"
+    dimensions: [due_date, factory_id, product_id]
+    filters: [tenant_id, time_range]
+  due_order_count:
+    source_target_id: oms_delivery
+    table_name: sales_order_delivery
+    aggregation: "count(order_id)"
+    dimensions: [due_date, factory_id, product_id]
+    filters: [tenant_id, time_range]
+  delayed_order_count:
+    source_target_id: oms_delivery
+    table_name: sales_order_delivery
+    aggregation: "count(case when delay_days > 0 then order_id end)"
+    dimensions: [due_date, factory_id, product_id]
+    filters: [tenant_id, time_range]
+  manufacturing_cost:
+    source_target_id: erp_cost
+    table_name: manufacturing_cost_detail
+    aggregation: "sum(actual_cost)"
+    dimensions: [cost_month, factory_id, product_id, cost_category]
+    filters: [tenant_id, time_range]
+  cost_variance_rate:
+    source_type: derived
+    formula: "(actual_cost - budget_cost) / budget_cost * 100"
+    dependencies: [actual_cost, budget_cost]
+  attendance_rate:
+    source_type: derived
+    formula: "actual_labor_hours / planned_labor_hours * 100"
+    dependencies: [actual_labor_hours, planned_labor_hours]
+  output_per_labor_hour:
+    source_type: derived
+    formula: "actual_output / actual_labor_hours"
+    dependencies: [actual_output, actual_labor_hours]
+  overtime_rate:
+    source_type: derived
+    formula: "overtime_hours / total_labor_hours * 100"
+    dependencies: [overtime_hours, total_labor_hours]
+
+query_templates:
+  - template_id: operations_production_monthly
+    purpose: 查询月度生产计划与实际产量
+    target_id: mes_operations
+    table_name: production_output
+    dimensions: [production_date, factory_id, line_id, product_id]
+    metrics: [planned_output, actual_output]
+    filters:
+      tenant_id: "{tenant_id}"
+      production_date: "{time_range}"
+  - template_id: operations_delivery_monthly
+    purpose: 查询月度订单交付表现
+    target_id: oms_delivery
+    table_name: sales_order_delivery
+    dimensions: [due_date, factory_id, product_id]
+    metrics: [due_order_count, on_time_order_count, delayed_order_count]
+    filters:
+      tenant_id: "{tenant_id}"
+      due_date: "{time_range}"
+  - template_id: operations_cost_monthly
+    purpose: 查询月度制造成本
+    target_id: erp_cost
+    table_name: manufacturing_cost_detail
+    dimensions: [cost_month, factory_id, product_id, cost_category]
+    metrics: [actual_cost, budget_cost]
+    filters:
+      tenant_id: "{tenant_id}"
+      cost_month: "{time_range}"
+  - template_id: operations_labor_monthly
+    purpose: 查询月度人力投入
+    target_id: hr_labor
+    table_name: labor_attendance_summary
+    dimensions: [work_date, factory_id, line_id]
+    metrics: [planned_labor_hours, actual_labor_hours, overtime_hours]
+    filters:
+      tenant_id: "{tenant_id}"
+      work_date: "{time_range}"
+
+evidence_requirements:
+  - evidence_id: production_rows
+    evidence_type: db_rows
+    source_target_id: mes_operations
+    table_name: production_output
+    required: true
+    required_for_sections: [executive_summary, production]
+  - evidence_id: quality_rows
+    evidence_type: db_rows
+    source_target_id: qms_operations
+    table_name: quality_exception
+    required: true
+    required_for_sections: [executive_summary, quality]
+  - evidence_id: delivery_rows
+    evidence_type: db_rows
+    source_target_id: oms_delivery
+    table_name: sales_order_delivery
+    required: true
+    required_for_sections: [executive_summary, delivery]
+  - evidence_id: cost_rows
+    evidence_type: db_rows
+    source_target_id: erp_cost
+    table_name: manufacturing_cost_detail
+    required: true
+    required_for_sections: [executive_summary, cost]
+  - evidence_id: labor_rows
+    evidence_type: db_rows
+    source_target_id: hr_labor
+    table_name: labor_attendance_summary
+    required: true
+    required_for_sections: [workforce]
+
+policy_constraints:
+  default_limit: 2000
+  max_rows: 20000
+  timeout_ms: 45000
+  allow_cross_db_join: false
+  require_tenant_filter: true
+  sensitive_field_policy:
+    customer_id: mask
+  forbidden_operations: [insert, update, delete, drop, alter, truncate]
+
+validation_rules:
+  - rule_id: require_core_domains
+    description: 运营复盘必须包含生产、质量、交付、成本、人力五类数据
+    required_tables: [production_output, quality_exception, sales_order_delivery, manufacturing_cost_detail, labor_attendance_summary]
+  - rule_id: require_tenant_time
+    description: 所有查询必须包含租户和时间范围
+    required_context: [tenant_id, time_range]

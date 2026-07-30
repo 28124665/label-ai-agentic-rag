@@ -24,17 +24,19 @@
 根据用户问题判断意图，路由到不同的工具（RAG / Database / Web / Chitchat）。
 """
 
-import asyncio
 import logging
 import time
 from typing import Any
 
 from agent.langgraph.routers.config_loader import load_config
 from agent.langgraph.routers.llm_router import get_llm_router
-from agent.langgraph.routers.models import RouteDecision
+from agent.langgraph.routers.models import ExecutionPlan, PlanStep, RouteDecision
 from agent.langgraph.routers.planner import get_planner
 from agent.langgraph.routers.pre_filter import get_pre_filter
 from agent.langgraph.routers.rule_router import get_rule_router
+from agent.langgraph.skills import SkillRegistry, SkillResolver
+from agent.langgraph.skills.evidence_adapter import SkillEvidenceAdapter
+from agent.langgraph.skills.models import SkillResolveContext
 from agent.langgraph.state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -69,13 +71,9 @@ async def intent_router_node(state: AgentState) -> dict[str, Any]:
             complexity="simple",
             metadata={},
         )
-        return {
-            "route_target": "chitchat",
-            "route_decision": default_decision,
-            "react_enabled": False,
-            "db_tool_enabled": True,
-            "node_timings": {"intent_router": int((time.time() - start_time) * 1000)},
-        }
+        return await _router_response(
+            state, default_decision, start_time, react_enabled=False, db_tool_enabled=True
+        )
 
     # 读取能力开关（每会话可独立控制）
     # - react.enabled: 是否启用受限 ReAct 子图（默认 False，向后兼容）
@@ -118,13 +116,9 @@ async def intent_router_node(state: AgentState) -> dict[str, Any]:
             f"{pre_filter_decision.target} (confidence={pre_filter_decision.confidence:.2f}, "
             f"reason={pre_filter_decision.reason})"
         )
-        return {
-            "route_target": pre_filter_decision.target,
-            "route_decision": pre_filter_decision,
-            "react_enabled": react_enabled,
-            "db_tool_enabled": db_tool_enabled,
-            "node_timings": {"intent_router": int((time.time() - start_time) * 1000)},
-        }
+        return await _router_response(
+            state, pre_filter_decision, start_time, react_enabled, db_tool_enabled
+        )
     
     # ========== 第1层：规则路由 ==========
     rule_router = get_rule_router(config)
@@ -142,13 +136,9 @@ async def intent_router_node(state: AgentState) -> dict[str, Any]:
         logger.info(
             f"[intent_router] 规则路由置信度 >= {rule_to_llm_threshold}，直接返回"
         )
-        return {
-            "route_target": rule_decision.target,
-            "route_decision": rule_decision,
-            "react_enabled": react_enabled,
-            "db_tool_enabled": db_tool_enabled,
-            "node_timings": {"intent_router": int((time.time() - start_time) * 1000)},
-        }
+        return await _router_response(
+            state, rule_decision, start_time, react_enabled, db_tool_enabled
+        )
     
     # ========== 第2层：LLM 语义路由 ==========
     llm_router = get_llm_router(config)
@@ -164,24 +154,16 @@ async def intent_router_node(state: AgentState) -> dict[str, Any]:
     if llm_decision.metadata.get("needs_clarification"):
         logger.info("[intent_router] LLM 判断需要用户澄清")
         # 暂时返回 LLM 决策，后续可以在前端实现澄清交互
-        return {
-            "route_target": llm_decision.target,
-            "route_decision": llm_decision,
-            "react_enabled": react_enabled,
-            "db_tool_enabled": db_tool_enabled,
-            "node_timings": {"intent_router": int((time.time() - start_time) * 1000)},
-        }
+        return await _router_response(
+            state, llm_decision, start_time, react_enabled, db_tool_enabled
+        )
 
     # 如果复杂度不是 complex，直接返回
     if llm_decision.complexity != "complex":
         logger.info("[intent_router] LLM 判断为非复杂任务，直接返回")
-        return {
-            "route_target": llm_decision.target,
-            "route_decision": llm_decision,
-            "react_enabled": react_enabled,
-            "db_tool_enabled": db_tool_enabled,
-            "node_timings": {"intent_router": int((time.time() - start_time) * 1000)},
-        }
+        return await _router_response(
+            state, llm_decision, start_time, react_enabled, db_tool_enabled
+        )
     
     # ========== 第3层：Planner 复杂任务规划 ==========
     planner = get_planner(config)
@@ -193,13 +175,110 @@ async def intent_router_node(state: AgentState) -> dict[str, Any]:
         f"reason={planner_decision.reason})"
     )
     
-    return {
-        "route_target": planner_decision.target,
-        "route_decision": planner_decision,
+    return await _router_response(
+        state, planner_decision, start_time, react_enabled, db_tool_enabled
+    )
+
+
+async def _router_response(
+    state: AgentState,
+    decision: RouteDecision,
+    start_time: float,
+    react_enabled: bool,
+    db_tool_enabled: bool,
+) -> dict[str, Any]:
+    """Attach skill runtime state without changing ordinary routing flows."""
+    updates: dict[str, Any] = {
+        "route_target": decision.target,
+        "route_decision": decision,
         "react_enabled": react_enabled,
         "db_tool_enabled": db_tool_enabled,
-        "node_timings": {"intent_router": int((time.time() - start_time) * 1000)},
     }
+    if _should_resolve_skill(state, decision):
+        registry = SkillRegistry()
+        resolution = SkillResolver(registry).resolve(
+            SkillResolveContext(
+                user_question=state.get("user_question", ""),
+                tenant_id=state.get("tenant_id", ""),
+                skill_id=_skill_hint(state, decision, "skill_id"),
+                report_type=_skill_hint(state, decision, "report_type"),
+                route_decision=decision.model_dump(),
+                agent_config=state.get("agent_config", {}) or {},
+            )
+        )
+        updates["skill_resolution"] = resolution.model_dump()
+        if resolution.resolved and resolution.skill_set is not None:
+            skill_set = resolution.skill_set
+            updates["skill_set"] = skill_set.model_dump()
+            updates["skill_evidence_requirements"] = [
+                requirement.model_dump()
+                for requirement in SkillEvidenceAdapter().collect_requirements(skill_set)
+            ]
+            if _needs_skill_plan(decision):
+                planned = await get_planner().plan_with_skills(
+                    state.get("user_question", ""),
+                    decision,
+                    skill_set,
+                    state.get("tenant_id", ""),
+                    time_range=state.get("time_range"),
+                    report_date=state.get("report_date"),
+                    query_lang=state.get("query_lang", "zh_CN"),
+                    agent_config=state.get("agent_config", {}) or {},
+                )
+                decision = planned
+                updates["route_target"] = planned.target
+                updates["route_decision"] = planned
+                plan = planned.metadata.get("plan")
+                if isinstance(plan, dict):
+                    updates["execution_plan"] = ExecutionPlan(
+                        plan_id=plan.get("plan_id", ""),
+                        steps=[PlanStep.from_dict(item) for item in plan.get("steps", [])],
+                        estimated_tokens=plan.get("estimated_tokens", 0),
+                        fallback_strategy=plan.get("fallback_strategy", "default"),
+                    )
+    updates["node_timings"] = {
+        "intent_router": int((time.time() - start_time) * 1000)
+    }
+    return updates
+
+
+def _should_resolve_skill(state: AgentState, decision: RouteDecision) -> bool:
+    """Return whether route context explicitly indicates a skill-guided report."""
+    metadata = decision.metadata or {}
+    if any(
+        _skill_hint(state, decision, key)
+        for key in ("report_type", "skill_id")
+    ):
+        return True
+    route_text = " ".join(
+        str(value)
+        for value in (
+            state.get("user_question", ""),
+            decision.target,
+            decision.reason,
+            metadata.get("intent", ""),
+        )
+    ).casefold()
+    return (
+        decision.complexity == "complex"
+        or any(keyword in route_text for keyword in ("report", "报告", "skill", "技能"))
+    )
+
+
+def _needs_skill_plan(decision: RouteDecision) -> bool:
+    """Plan resolved report skills and complex routed requests deterministically."""
+    return decision.complexity == "complex" or "report" in (
+        f"{decision.target} {decision.reason}".casefold()
+    ) or "报告" in decision.reason
+
+
+def _skill_hint(state: AgentState, decision: RouteDecision, key: str) -> str | None:
+    """Read explicit skill selection from state first, then route metadata."""
+    value = state.get(key)
+    if isinstance(value, str) and value:
+        return value
+    value = (decision.metadata or {}).get(key)
+    return value if isinstance(value, str) and value else None
 
 
 def route_decision(state: AgentState) -> str:

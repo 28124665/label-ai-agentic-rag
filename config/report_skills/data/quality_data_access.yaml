@@ -1,0 +1,267 @@
+skill_id: quality_data_access
+skill_type: data
+version: "1.0"
+name: 质量报告数据访问 Skill
+description: 指导质量报告所需 DBTool 查询计划、库表范围、字段、指标绑定与权限约束
+enabled: true
+linked_report_skill_id: quality_report
+
+db_targets:
+  - target_id: qms_quality
+    db_id: qms_prod
+    purpose: 查询质量异常、检验、客诉和整改闭环数据
+    required: true
+    connection_scope: tenant
+    tables:
+      - table_name: quality_exception
+        purpose: 质量异常主表
+        required: true
+        required_fields:
+          - tenant_id
+          - exception_id
+          - exception_type
+          - severity_level
+          - root_cause_category
+          - status
+          - occurred_at
+          - closed_at
+          - factory_id
+          - line_id
+          - product_id
+          - customer_id
+          - exception_count
+        allowed_filters:
+          - tenant_id
+          - occurred_at
+          - factory_id
+          - line_id
+          - product_id
+          - exception_type
+          - status
+        sensitive_fields:
+          - customer_id
+      - table_name: quality_inspection_result
+        purpose: 检验结果与一次通过率计算
+        required: true
+        required_fields:
+          - tenant_id
+          - inspection_id
+          - inspection_date
+          - factory_id
+          - line_id
+          - product_id
+          - input_count
+          - first_pass_count
+          - fail_count
+        allowed_filters:
+          - tenant_id
+          - inspection_date
+          - factory_id
+          - line_id
+          - product_id
+        sensitive_fields: []
+      - table_name: corrective_action
+        purpose: 纠正与预防措施闭环状态
+        required: false
+        required_fields:
+          - tenant_id
+          - action_id
+          - exception_id
+          - action_type
+          - owner_dept
+          - status
+          - due_date
+          - closed_at
+        allowed_filters:
+          - tenant_id
+          - exception_id
+          - status
+          - owner_dept
+        sensitive_fields: []
+
+  - target_id: mes_production
+    db_id: mes_prod
+    purpose: 查询生产产量、投入数量、产线维度数据
+    required: true
+    connection_scope: tenant
+    tables:
+      - table_name: production_output
+        purpose: 生产产量与计划达成
+        required: true
+        required_fields:
+          - tenant_id
+          - production_date
+          - factory_id
+          - line_id
+          - product_id
+          - planned_output
+          - actual_output
+          - input_count
+        allowed_filters:
+          - tenant_id
+          - production_date
+          - factory_id
+          - line_id
+          - product_id
+        sensitive_fields: []
+
+metric_bindings:
+  exception_count:
+    source_target_id: qms_quality
+    table_name: quality_exception
+    aggregation: "sum(exception_count)"
+    dimensions: [occurred_at, factory_id, line_id, product_id, exception_type]
+    filters: [tenant_id, time_range]
+  exception_rate:
+    source_type: derived
+    formula: "exception_count / production_count * 100"
+    dependencies: [exception_count, production_count]
+  production_count:
+    source_target_id: mes_production
+    table_name: production_output
+    aggregation: "sum(actual_output)"
+    dimensions: [production_date, factory_id, line_id, product_id]
+    filters: [tenant_id, time_range]
+  first_pass_yield:
+    source_type: derived
+    formula: "first_pass_count / input_count * 100"
+    dependencies: [first_pass_count, input_count]
+  first_pass_count:
+    source_target_id: qms_quality
+    table_name: quality_inspection_result
+    aggregation: "sum(first_pass_count)"
+    dimensions: [inspection_date, factory_id, line_id, product_id]
+    filters: [tenant_id, time_range]
+  input_count:
+    source_target_id: qms_quality
+    table_name: quality_inspection_result
+    aggregation: "sum(input_count)"
+    dimensions: [inspection_date, factory_id, line_id, product_id]
+    filters: [tenant_id, time_range]
+  top_exception_types:
+    source_target_id: qms_quality
+    table_name: quality_exception
+    aggregation: "sum(exception_count) by exception_type order by sum(exception_count) desc"
+    dimensions: [exception_type]
+    filters: [tenant_id, time_range]
+  root_cause_distribution:
+    source_target_id: qms_quality
+    table_name: quality_exception
+    aggregation: "sum(exception_count) by root_cause_category"
+    dimensions: [root_cause_category]
+    filters: [tenant_id, time_range]
+
+query_templates:
+  - template_id: quality_exception_detail
+    purpose: 查询质量异常明细
+    target_id: qms_quality
+    table_name: quality_exception
+    dimensions:
+      - occurred_at
+      - factory_id
+      - line_id
+      - product_id
+      - exception_type
+      - root_cause_category
+      - status
+    metrics:
+      - exception_count
+    filters:
+      tenant_id: "{tenant_id}"
+      occurred_at: "{time_range}"
+  - template_id: quality_trend
+    purpose: 查询质量异常趋势
+    target_id: qms_quality
+    table_name: quality_exception
+    dimensions:
+      - occurred_at
+    metrics:
+      - exception_count
+    filters:
+      tenant_id: "{tenant_id}"
+      occurred_at: "{time_range}"
+    time_granularity: month
+  - template_id: production_output_for_quality
+    purpose: 查询质量报告所需生产数量
+    target_id: mes_production
+    table_name: production_output
+    dimensions:
+      - production_date
+      - factory_id
+      - line_id
+      - product_id
+    metrics:
+      - actual_output
+      - input_count
+    filters:
+      tenant_id: "{tenant_id}"
+      production_date: "{time_range}"
+  - template_id: quality_inspection_for_fpy
+    purpose: 查询一次通过率所需检验明细
+    target_id: qms_quality
+    table_name: quality_inspection_result
+    dimensions:
+      - inspection_date
+      - factory_id
+      - line_id
+      - product_id
+    metrics:
+      - input_count
+      - first_pass_count
+      - fail_count
+    filters:
+      tenant_id: "{tenant_id}"
+      inspection_date: "{time_range}"
+
+evidence_requirements:
+  - evidence_id: quality_exception_rows
+    evidence_type: db_rows
+    source_target_id: qms_quality
+    table_name: quality_exception
+    required: true
+    required_for_sections: [overview, trend, exception_distribution, root_cause]
+  - evidence_id: production_output_rows
+    evidence_type: db_rows
+    source_target_id: mes_production
+    table_name: production_output
+    required: true
+    required_for_sections: [overview, trend]
+  - evidence_id: inspection_rows
+    evidence_type: db_rows
+    source_target_id: qms_quality
+    table_name: quality_inspection_result
+    required: true
+    required_for_sections: [overview]
+  - evidence_id: corrective_action_rows
+    evidence_type: db_rows
+    source_target_id: qms_quality
+    table_name: corrective_action
+    required: false
+    required_for_sections: [corrective_action]
+
+policy_constraints:
+  default_limit: 1000
+  max_rows: 10000
+  timeout_ms: 30000
+  allow_cross_db_join: false
+  require_tenant_filter: true
+  sensitive_field_policy:
+    customer_id: mask
+  forbidden_operations:
+    - insert
+    - update
+    - delete
+    - drop
+    - alter
+    - truncate
+
+validation_rules:
+  - rule_id: require_time_range
+    description: 所有质量查询必须包含时间范围
+    required_context: [time_range]
+  - rule_id: require_tenant
+    description: 所有查询必须包含 tenant_id 过滤
+    required_context: [tenant_id]
+  - rule_id: exception_rate_requires_production
+    description: 计算异常率必须同时存在异常数量和生产数量
+    required_metrics: [exception_count, production_count]

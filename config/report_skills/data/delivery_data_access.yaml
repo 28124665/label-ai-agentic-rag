@@ -1,0 +1,175 @@
+skill_id: delivery_data_access
+skill_type: data
+version: "1.0"
+name: 交付绩效数据访问 Skill
+description: 指导订单准交率、延期原因、履约瓶颈报告所需 DB 查询计划
+enabled: true
+linked_report_skill_id: delivery_performance
+
+db_targets:
+  - target_id: oms_delivery
+    db_id: oms_prod
+    purpose: 查询订单、交付、延期和客户维度数据
+    required: true
+    tables:
+      - table_name: sales_order_delivery
+        purpose: 订单交付履约主表
+        required: true
+        required_fields: [tenant_id, order_id, customer_id, factory_id, product_id, due_date, delivery_date, status, delay_days, order_amount]
+        allowed_filters: [tenant_id, due_date, delivery_date, factory_id, product_id, status, customer_id]
+        sensitive_fields: [customer_id, order_amount]
+      - table_name: delivery_exception
+        purpose: 交付异常与延期原因
+        required: true
+        required_fields: [tenant_id, exception_id, order_id, delay_reason, responsibility_stage, occurred_at, resolved_at]
+        allowed_filters: [tenant_id, order_id, delay_reason, responsibility_stage, occurred_at]
+        sensitive_fields: []
+  - target_id: scm_fulfillment
+    db_id: scm_prod
+    purpose: 查询备料、生产、检验、出货各环节履约耗时
+    required: true
+    tables:
+      - table_name: fulfillment_stage_tracking
+        purpose: 订单履约环节跟踪
+        required: true
+        required_fields: [tenant_id, order_id, stage_name, stage_start_time, stage_end_time, stage_duration_hours, standard_duration_hours]
+        allowed_filters: [tenant_id, order_id, stage_name, stage_start_time]
+        sensitive_fields: []
+      - table_name: material_shortage
+        purpose: 缺料影响分析
+        required: false
+        required_fields: [tenant_id, shortage_id, order_id, material_id, shortage_qty, required_date, expected_arrival_date]
+        allowed_filters: [tenant_id, order_id, material_id, required_date]
+        sensitive_fields: []
+
+metric_bindings:
+  delivery_on_time_rate:
+    source_type: derived
+    formula: "on_time_order_count / due_order_count * 100"
+    dependencies: [on_time_order_count, due_order_count]
+  due_order_count:
+    source_target_id: oms_delivery
+    table_name: sales_order_delivery
+    aggregation: "count(order_id)"
+    dimensions: [due_date, factory_id, product_id]
+    filters: [tenant_id, time_range]
+  on_time_order_count:
+    source_target_id: oms_delivery
+    table_name: sales_order_delivery
+    aggregation: "count(case when delay_days <= 0 then order_id end)"
+    dimensions: [due_date, factory_id, product_id]
+    filters: [tenant_id, time_range]
+  delayed_order_count:
+    source_target_id: oms_delivery
+    table_name: sales_order_delivery
+    aggregation: "count(case when delay_days > 0 then order_id end)"
+    dimensions: [due_date, factory_id, product_id]
+    filters: [tenant_id, time_range]
+  average_delay_days:
+    source_target_id: oms_delivery
+    table_name: sales_order_delivery
+    aggregation: "avg(delay_days)"
+    dimensions: [due_date, factory_id, product_id]
+    filters: [tenant_id, time_range, delayed_only]
+  delay_reason_distribution:
+    source_target_id: oms_delivery
+    table_name: delivery_exception
+    aggregation: "count(exception_id) by delay_reason"
+    dimensions: [delay_reason]
+    filters: [tenant_id, time_range]
+  fulfillment_stage_duration:
+    source_target_id: scm_fulfillment
+    table_name: fulfillment_stage_tracking
+    aggregation: "avg(stage_duration_hours) by stage_name"
+    dimensions: [stage_name]
+    filters: [tenant_id, time_range]
+  risk_order_list:
+    source_target_id: oms_delivery
+    table_name: sales_order_delivery
+    aggregation: "filter(status != 'delivered' and due_date < current_date + risk_window_days)"
+    dimensions: [order_id, customer_id, due_date, status]
+    filters: [tenant_id, risk_orders]
+
+query_templates:
+  - template_id: delivery_summary
+    purpose: 查询订单准交率和延期规模
+    target_id: oms_delivery
+    table_name: sales_order_delivery
+    dimensions: [due_date, factory_id, product_id]
+    metrics: [due_order_count, on_time_order_count, delayed_order_count, average_delay_days]
+    filters:
+      tenant_id: "{tenant_id}"
+      due_date: "{time_range}"
+  - template_id: delay_reason
+    purpose: 查询延期原因分布
+    target_id: oms_delivery
+    table_name: delivery_exception
+    dimensions: [delay_reason, responsibility_stage]
+    metrics: [exception_count]
+    filters:
+      tenant_id: "{tenant_id}"
+      occurred_at: "{time_range}"
+  - template_id: fulfillment_stage
+    purpose: 查询履约环节耗时
+    target_id: scm_fulfillment
+    table_name: fulfillment_stage_tracking
+    dimensions: [stage_name]
+    metrics: [stage_duration_hours, standard_duration_hours]
+    filters:
+      tenant_id: "{tenant_id}"
+      stage_start_time: "{time_range}"
+  - template_id: material_shortage_for_delivery
+    purpose: 查询缺料对交付的影响
+    target_id: scm_fulfillment
+    table_name: material_shortage
+    dimensions: [material_id, required_date]
+    metrics: [shortage_qty]
+    filters:
+      tenant_id: "{tenant_id}"
+      required_date: "{time_range}"
+
+evidence_requirements:
+  - evidence_id: delivery_rows
+    evidence_type: db_rows
+    source_target_id: oms_delivery
+    table_name: sales_order_delivery
+    required: true
+    required_for_sections: [overview, delay_analysis, conclusion]
+  - evidence_id: delay_exception_rows
+    evidence_type: db_rows
+    source_target_id: oms_delivery
+    table_name: delivery_exception
+    required: true
+    required_for_sections: [delay_reason]
+  - evidence_id: fulfillment_stage_rows
+    evidence_type: db_rows
+    source_target_id: scm_fulfillment
+    table_name: fulfillment_stage_tracking
+    required: true
+    required_for_sections: [bottleneck]
+  - evidence_id: shortage_rows
+    evidence_type: db_rows
+    source_target_id: scm_fulfillment
+    table_name: material_shortage
+    required: false
+    required_for_sections: [delay_reason, risk_orders]
+
+policy_constraints:
+  default_limit: 2000
+  max_rows: 20000
+  timeout_ms: 45000
+  allow_cross_db_join: false
+  require_tenant_filter: true
+  sensitive_field_policy:
+    customer_id: mask
+    order_amount: mask
+  forbidden_operations: [insert, update, delete, drop, alter, truncate]
+
+validation_rules:
+  - rule_id: delivery_requires_order_rows
+    description: 交付报告必须包含订单履约数据
+    required_tables: [sales_order_delivery]
+  - rule_id: delay_reason_requires_exception_rows
+    description: 延期原因章节必须包含交付异常数据
+    required_tables: [delivery_exception]
+    required_sections: [delay_reason]

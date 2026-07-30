@@ -1,0 +1,153 @@
+skill_id: factory_performance_data_access
+skill_type: data
+version: "1.0"
+name: 工厂/产线绩效数据访问 Skill
+description: 指导工厂和产线绩效报告所需 DB 查询、指标绑定与权限约束
+enabled: true
+linked_report_skill_id: factory_performance
+
+db_targets:
+  - target_id: mes_factory
+    db_id: mes_prod
+    purpose: 查询工厂、产线、工序、产量和 OEE 数据
+    required: true
+    tables:
+      - table_name: production_output
+        purpose: 工厂/产线产量与达成
+        required: true
+        required_fields: [tenant_id, production_date, factory_id, line_id, product_id, planned_output, actual_output]
+        allowed_filters: [tenant_id, production_date, factory_id, line_id, product_id]
+        sensitive_fields: []
+      - table_name: line_oee_summary
+        purpose: 产线 OEE 汇总
+        required: true
+        required_fields: [tenant_id, stat_date, factory_id, line_id, availability, performance, quality_rate, oee]
+        allowed_filters: [tenant_id, stat_date, factory_id, line_id]
+        sensitive_fields: []
+      - table_name: process_cycle_time
+        purpose: 工序节拍与瓶颈识别
+        required: false
+        required_fields: [tenant_id, stat_date, factory_id, line_id, process_id, process_name, cycle_time, standard_cycle_time, wip_count]
+        allowed_filters: [tenant_id, stat_date, factory_id, line_id, process_id]
+        sensitive_fields: []
+  - target_id: qms_factory
+    db_id: qms_prod
+    purpose: 查询工厂/产线质量表现
+    required: true
+    tables:
+      - table_name: quality_inspection_result
+        purpose: 工厂/产线一次通过率
+        required: true
+        required_fields: [tenant_id, inspection_date, factory_id, line_id, product_id, input_count, first_pass_count]
+        allowed_filters: [tenant_id, inspection_date, factory_id, line_id, product_id]
+        sensitive_fields: []
+
+metric_bindings:
+  factory_achievement_rate:
+    source_type: derived
+    formula: "actual_output / planned_output * 100"
+    dependencies: [actual_output, planned_output]
+  actual_output:
+    source_target_id: mes_factory
+    table_name: production_output
+    aggregation: "sum(actual_output)"
+    dimensions: [production_date, factory_id, line_id, product_id]
+    filters: [tenant_id, time_range]
+  planned_output:
+    source_target_id: mes_factory
+    table_name: production_output
+    aggregation: "sum(planned_output)"
+    dimensions: [production_date, factory_id, line_id, product_id]
+    filters: [tenant_id, time_range]
+  factory_oee:
+    source_target_id: mes_factory
+    table_name: line_oee_summary
+    aggregation: "avg(oee)"
+    dimensions: [stat_date, factory_id, line_id]
+    filters: [tenant_id, time_range]
+  factory_fpy:
+    source_type: derived
+    formula: "first_pass_count / input_count * 100"
+    dependencies: [first_pass_count, input_count]
+  performance_ranking:
+    source_target_id: mes_factory
+    table_name: production_output
+    aggregation: "sum(actual_output) / sum(planned_output) by factory_id"
+    dimensions: [factory_id]
+    filters: [tenant_id, time_range]
+  target_deviation_rate:
+    source_type: derived
+    formula: "(actual_value - target_value) / target_value * 100"
+    dependencies: [actual_value, target_value]
+  bottleneck_process_list:
+    source_target_id: mes_factory
+    table_name: process_cycle_time
+    aggregation: "rank(cycle_time desc, wip_count desc)"
+    dimensions: [process_name]
+    filters: [tenant_id, time_range]
+
+query_templates:
+  - template_id: factory_output_performance
+    purpose: 查询工厂生产达成
+    target_id: mes_factory
+    table_name: production_output
+    dimensions: [production_date, factory_id, line_id, product_id]
+    metrics: [planned_output, actual_output]
+    filters:
+      tenant_id: "{tenant_id}"
+      production_date: "{time_range}"
+  - template_id: factory_oee
+    purpose: 查询工厂 OEE
+    target_id: mes_factory
+    table_name: line_oee_summary
+    dimensions: [stat_date, factory_id, line_id]
+    metrics: [availability, performance, quality_rate, oee]
+    filters:
+      tenant_id: "{tenant_id}"
+      stat_date: "{time_range}"
+  - template_id: process_bottleneck
+    purpose: 查询瓶颈工序
+    target_id: mes_factory
+    table_name: process_cycle_time
+    dimensions: [factory_id, line_id, process_name]
+    metrics: [cycle_time, standard_cycle_time, wip_count]
+    filters:
+      tenant_id: "{tenant_id}"
+      stat_date: "{time_range}"
+
+evidence_requirements:
+  - evidence_id: factory_output_rows
+    evidence_type: db_rows
+    source_target_id: mes_factory
+    table_name: production_output
+    required: true
+    required_for_sections: [overview, factory_ranking, exception_factory]
+  - evidence_id: factory_oee_rows
+    evidence_type: db_rows
+    source_target_id: mes_factory
+    table_name: line_oee_summary
+    required: true
+    required_for_sections: [overview, factory_ranking, exception_factory]
+  - evidence_id: process_bottleneck_rows
+    evidence_type: db_rows
+    source_target_id: mes_factory
+    table_name: process_cycle_time
+    required: false
+    required_for_sections: [bottleneck]
+
+policy_constraints:
+  default_limit: 2000
+  max_rows: 20000
+  timeout_ms: 30000
+  allow_cross_db_join: false
+  require_tenant_filter: true
+  sensitive_field_policy: {}
+  forbidden_operations: [insert, update, delete, drop, alter, truncate]
+
+validation_rules:
+  - rule_id: ranking_same_scope
+    description: 排名查询必须限定相同时间范围和组织维度
+    required_context: [tenant_id, time_range]
+  - rule_id: factory_required
+    description: 工厂绩效报告至少需要一个 factory_id 或明确集团范围
+    required_any_context: [factory_id, org_scope]

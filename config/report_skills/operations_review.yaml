@@ -1,0 +1,335 @@
+skill_id: operations_review
+version: "1.0"
+name: 月度运营复盘
+description: 月度运营复盘，覆盖产量、质量、交付、成本、人力
+enabled: true
+
+report_type: operations_analysis
+intent_keywords:
+  - 运营
+  - 经营
+  - 复盘
+  - 月报
+  - 产量
+  - 交付
+  - 成本
+  - 人力
+  - 良率
+required_context:
+  - tenant_id
+  - time_range
+allowed_tenants: []
+required_permissions:
+  - report:generate
+  - operations:read
+
+section_templates:
+  - section_id: executive_summary
+    title: 一、经营摘要
+    order: 1
+    required: true
+    section_type: overview
+    purpose: 给高管提供本月经营结论和异常概览
+    required_evidence_types: [db]
+    required_metric_ids: [production_achievement_rate, delivery_on_time_rate, quality_exception_rate, cost_variance_rate]
+    min_claims: 3
+    max_claims: 6
+    allowed_claim_types: [fact, metric, comparison]
+    prompt_hint: 只呈现关键偏离项和管理动作
+    fallback_mode: fail
+  - section_id: production
+    title: 二、生产表现
+    order: 2
+    required: true
+    section_type: analysis
+    purpose: 分析产量、达成率和瓶颈
+    required_evidence_types: [db]
+    required_metric_ids: [planned_output, actual_output, production_achievement_rate]
+    min_claims: 3
+    max_claims: 7
+    allowed_claim_types: [metric, trend, comparison]
+    prompt_hint: 明确计划与实际差异
+    fallback_mode: fail
+  - section_id: quality
+    title: 三、质量表现
+    order: 3
+    required: true
+    section_type: analysis
+    purpose: 分析质量异常、良率和主要风险
+    required_evidence_types: [db]
+    required_metric_ids: [quality_exception_rate, first_pass_yield]
+    min_claims: 2
+    max_claims: 6
+    allowed_claim_types: [metric, comparison, trend]
+    prompt_hint: 与目标值和上一周期对比
+    fallback_mode: fail
+  - section_id: delivery
+    title: 四、交付表现
+    order: 4
+    required: true
+    section_type: analysis
+    purpose: 分析订单准交率和延期原因
+    required_evidence_types: [db]
+    required_metric_ids: [delivery_on_time_rate, delayed_order_count]
+    min_claims: 2
+    max_claims: 6
+    allowed_claim_types: [metric, comparison]
+    prompt_hint: 列出影响交付的主要环节
+    fallback_mode: fail
+  - section_id: cost
+    title: 五、成本表现
+    order: 5
+    required: true
+    section_type: analysis
+    purpose: 分析成本偏差和主要成本驱动因素
+    required_evidence_types: [db]
+    required_metric_ids: [cost_variance_rate, manufacturing_cost]
+    min_claims: 2
+    max_claims: 6
+    allowed_claim_types: [metric, comparison]
+    prompt_hint: 说明成本上升或下降的主要来源
+    fallback_mode: fail
+  - section_id: workforce
+    title: 六、人力与效率
+    order: 6
+    required: true
+    section_type: analysis
+    purpose: 分析人力投入、出勤和人效
+    required_evidence_types: [db]
+    required_metric_ids: [attendance_rate, output_per_labor_hour, overtime_rate]
+    min_claims: 2
+    max_claims: 6
+    allowed_claim_types: [metric, comparison]
+    prompt_hint: 避免涉及个人敏感信息
+    fallback_mode: summary
+  - section_id: risks
+    title: 七、主要风险与机会
+    order: 7
+    required: false
+    section_type: analysis
+    purpose: 识别下周期经营风险和改善机会
+    required_evidence_types: [db, rag]
+    required_metric_ids: []
+    min_claims: 2
+    max_claims: 6
+    allowed_claim_types: [fact, recommendation]
+    prompt_hint: 风险必须有数据或制度依据
+    fallback_mode: summary
+  - section_id: actions
+    title: 八、下周期行动项
+    order: 8
+    required: true
+    section_type: recommendation
+    purpose: 输出下周期管理动作和责任方向
+    required_evidence_types: [db, rag]
+    required_metric_ids: []
+    min_claims: 3
+    max_claims: 8
+    allowed_claim_types: [recommendation]
+    prompt_hint: 每个行动项对应一个已验证问题
+    fallback_mode: fail
+
+core_sections:
+  - executive_summary
+  - production
+  - quality
+  - delivery
+  - cost
+  - workforce
+  - actions
+optional_sections:
+  - risks
+
+required_evidence_types:
+  - db
+  - rag
+min_evidence_count: 5
+min_db_evidence_count: 4
+min_rag_evidence_count: 1
+evidence_filters:
+  require_structured_db_rows: true
+  allow_unverified_web: false
+
+metric_definitions:
+  - metric_id: planned_output
+    name: 计划产量
+    description: 计划生产数量
+    data_type: count
+    unit: 件
+    source_type: db
+    source_fields: [planned_output]
+    formula: "sum(planned_output)"
+    comparison_modes: [actual]
+    precision: 0
+    verification_required: true
+  - metric_id: actual_output
+    name: 实际产量
+    description: 实际生产数量
+    data_type: count
+    unit: 件
+    source_type: db
+    source_fields: [actual_output]
+    formula: "sum(actual_output)"
+    comparison_modes: [plan, previous_period]
+    precision: 0
+    verification_required: true
+  - metric_id: production_achievement_rate
+    name: 生产达成率
+    description: 实际产量与计划产量的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [actual_output, planned_output]
+    formula: "actual_output / planned_output * 100"
+    comparison_modes: [target, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: delivery_on_time_rate
+    name: 订单准交率
+    description: 按期交付订单数与应交付订单数的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [on_time_order_count, due_order_count]
+    formula: "on_time_order_count / due_order_count * 100"
+    comparison_modes: [target, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: delayed_order_count
+    name: 延期订单数
+    description: 未按计划交付的订单数量
+    data_type: count
+    unit: 单
+    source_type: db
+    source_fields: [delayed_order_count]
+    formula: "sum(delayed_order_count)"
+    comparison_modes: [previous_period]
+    precision: 0
+    verification_required: true
+  - metric_id: quality_exception_rate
+    name: 质量异常率
+    description: 质量异常数量与生产数量的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [exception_count, production_count]
+    formula: "exception_count / production_count * 100"
+    comparison_modes: [target, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: first_pass_yield
+    name: 一次通过率
+    description: 首次检验通过数量与投入数量的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [first_pass_count, input_count]
+    formula: "first_pass_count / input_count * 100"
+    comparison_modes: [target, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: manufacturing_cost
+    name: 制造成本
+    description: 指定周期内的制造总成本
+    data_type: currency
+    unit: CNY
+    source_type: db
+    source_fields: [manufacturing_cost]
+    formula: "sum(manufacturing_cost)"
+    comparison_modes: [budget, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: cost_variance_rate
+    name: 成本偏差率
+    description: 实际成本与预算成本的偏差比例
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [actual_cost, budget_cost]
+    formula: "(actual_cost - budget_cost) / budget_cost * 100"
+    comparison_modes: [budget]
+    precision: 2
+    verification_required: true
+  - metric_id: attendance_rate
+    name: 出勤率
+    description: 实际出勤人时与计划人时的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [actual_labor_hours, planned_labor_hours]
+    formula: "actual_labor_hours / planned_labor_hours * 100"
+    comparison_modes: [target, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: output_per_labor_hour
+    name: 人均小时产出
+    description: 实际产量与实际人工小时的比率
+    data_type: ratio
+    unit: 件/小时
+    source_type: derived
+    source_fields: [actual_output, actual_labor_hours]
+    formula: "actual_output / actual_labor_hours"
+    comparison_modes: [target, previous_period]
+    precision: 2
+    verification_required: true
+  - metric_id: overtime_rate
+    name: 加班率
+    description: 加班人时与总人时的比率
+    data_type: percent
+    unit: "%"
+    source_type: derived
+    source_fields: [overtime_hours, total_labor_hours]
+    formula: "overtime_hours / total_labor_hours * 100"
+    comparison_modes: [target, previous_period]
+    precision: 2
+    verification_required: true
+metric_formulas: {}
+numeric_tolerance: 0.0001
+time_granularity: month
+
+prompt_profile: manufacturing_operations_review
+writing_style:
+  audience: executive
+  tone: management_summary
+  language_style: concise_decision_oriented
+  conclusion_first: true
+forbidden_claims:
+  - 无数据支撑的全面改善判断
+  - 将预算偏差描述为确定节约
+required_disclaimers:
+  - 本报告基于当前生产、质量、交付、成本与人力数据生成，指标口径需在发布前与业务部门确认。
+
+claim_rules:
+  - rule_id: operations_metric_db_only
+    description: 运营指标必须来自结构化 DB Evidence
+    claim_types: [metric, comparison]
+    required_source_types: [db]
+  - rule_id: action_requires_problem
+    description: 行动项必须关联一个已验证问题或风险
+    claim_types: [recommendation]
+    required_source_types: [db, rag]
+  - rule_id: no_personal_labor_detail
+    description: 人力分析不得包含个人身份或个人绩效明细
+    forbidden_terms: [员工姓名, 身份证号, 个人绩效]
+section_quality_thresholds:
+  core: 0.82
+  optional: 0.7
+  minimum: 0.6
+publish_policy:
+  require_all_core_sections: true
+  allow_partial: false
+  allow_summary_only: true
+  block_on_sensitive_data: true
+
+default_format: markdown
+allowed_formats:
+  - markdown
+  - html
+export_templates:
+  markdown: operations_review.md.j2
+  html: operations_review.html.j2
+style_config:
+  theme: executive_dashboard
+  show_kpi_cards: true
+  show_domain_sections: true
+  show_action_items: true

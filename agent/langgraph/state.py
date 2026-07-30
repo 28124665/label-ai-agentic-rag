@@ -19,7 +19,7 @@
 确保状态传递的类型安全和可追溯性。
 """
 
-from typing import Annotated, Any, Literal, TypedDict, Optional
+from typing import Annotated, Literal, TypedDict, Optional
 
 from agent.langgraph.routers.models import ExecutionPlan, RouteDecision
 
@@ -51,6 +51,7 @@ class ToolResult(TypedDict, total=False):
     tool: str
     success: bool
     error: str
+    error_code: str
     rag_docs: list[dict]
     rag_quality_score: float
     rag_has_relevant: bool
@@ -62,6 +63,11 @@ class ToolResult(TypedDict, total=False):
     latency_ms: int
     db_id: str
     kb_ids: list[str]
+    skill_id: str
+    data_skill_id: str
+    retrieval_skill_id: str
+    query_template_id: str
+    evidence_ids: list[str]
 
 
 def merge_timings(left: dict | None, right: dict | None) -> dict:
@@ -233,3 +239,28 @@ class AgentState(TypedDict, total=False):
     #   - True: 复杂任务有可能使用 db_tool（由路由决定）
     #   - False: 路由时跳过 db_tool，hybrid 降级为单 RAG，database 降级为 rag_tool
     db_tool_enabled: bool
+
+    # ========== 报告生成（Report Tool） ==========
+    # report_artifacts: list[dict]   — ReportArtifact 列表（通常 1 个）
+    # report_summary: str            — 报告摘要，用于最终答案展示
+    # report_quality_score: float    — 报告质量分
+    # report_error: str              — 报告生成错误信息
+    # report_error_code: str         — 错误码（REPORT_*）
+    # report_file_uri: str           — 产物 URI
+    # report_download_url: str       — 下载链接
+    # report_partial: bool           — 是否部分成功
+    report_artifacts: list[dict]
+    report_summary: str
+    report_quality_score: float
+    report_error: str
+    report_error_code: str
+    report_file_uri: str
+    report_download_url: str
+    report_partial: bool
+
+    # ========== Skill 运行时 ==========
+    skill_set: dict | None
+    skill_resolution: dict | None
+    skill_plan: dict | None
+    skill_validation_result: dict | None
+    skill_evidence_requirements: list[dict]
