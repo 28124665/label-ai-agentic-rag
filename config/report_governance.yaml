@@ -1,0 +1,99 @@
+# Report Tool 可信治理与人机协同配置
+# 按 docs/报告可信治理与人机协同补强设计.md §10 配置设计
+
+report_governance:
+  enabled: true
+
+  # ========== Claim 血缘（按 docs §4） ==========
+  claim:
+    # 置信度阈值：低于此值标记 needs_human_review
+    low_confidence_threshold: 0.7
+    # 触发人工审核的低置信 Claim 占比阈值
+    low_confidence_ratio_threshold: 0.3
+    # 哪些 ClaimType 必须有 evidence
+    require_evidence_types:
+      - metric
+      - comparison
+      - trend
+      - fact
+    # 哪些 ClaimType 允许无 evidence（仅标记 unsupported）
+    allow_no_evidence_types:
+      - recommendation
+
+  # ========== Human Review（按 docs §6） ==========
+  human_review:
+    # 启用人工审核节点
+    enabled: true
+    # 默认通过审核（False = 必须经过审核）
+    auto_approve_by_default: true
+    # 高敏报告类型（强制进入审核）
+    high_sensitivity_report_types:
+      - financial_report
+      - cost_analysis
+      - quality_analysis
+      - ehs_report
+      - hr_report
+      - compliance_report
+    # 审核超时（秒），超时自动降级
+    review_timeout_seconds: 86400
+    # 审核通过后是否自动 published（true=自动发布，false=保留 approved 等待）
+    auto_publish_on_approve: true
+
+  # ========== 数据来源（按 docs §5） ==========
+  data_source:
+    # 是否在 Markdown / HTML 末尾追加数据来源区块
+    include_in_export: true
+    # 是否在 Markdown 中包含 query_id（可关闭以防泄露敏感 ID）
+    include_query_id: true
+    # 是否包含 doc_id / chunk_id
+    include_doc_refs: true
+    # 区块标题
+    markdown_section_title: "数据来源"
+    html_section_title: "数据来源（Data Sources）"
+
+  # ========== Skill 治理（按 docs §7） ==========
+  skill_governance:
+    # 是否启用生命周期治理
+    enabled: true
+    # approved 状态是否默认对所有租户放开（灰度）
+    default_allow_approved: false
+    # 权限交集：用户权限必须覆盖 Skill 所需权限全集
+    require_full_permission_intersection: true
+    # 是否记录变更审计
+    enable_change_log: true
+
+  # ========== 用户反馈（按 docs §8） ==========
+  feedback:
+    # 是否启用反馈采集
+    enabled: true
+    # 内存中保留的最大反馈条数（防止 OOM）
+    max_history: 10000
+    # 触发优化建议的阈值
+    optimization_thresholds:
+      dislike_per_claim: 3
+      edit_per_section: 2
+      regenerate_per_report: 2
+
+  # ========== 导出器扩展（按 docs §6.5） ==========
+  exporter:
+    # 是否在 Markdown 末尾追加"未经验证"标记
+    include_unverified_marks: true
+    # 是否在 HTML 中高亮"需人工核实"
+    highlight_needs_human_review: true
+    # HTML 中"未经验证"的 CSS 类
+    unverified_css_class: "unverified"
+    # HTML 中"需人工核实"的 CSS 类
+    needs_review_css_class: "needs-review"
+
+  # ========== 错误码扩展（按 docs §6.4） ==========
+  error_codes:
+    publish_pending: "REPORT_PUBLISH_PENDING"
+    rejected: "REPORT_REJECTED"
+
+# ========== 默认配置合并：以下字段会合并到 report.* 配置中 ==========
+# 兼容旧版本 config/report.yaml 的 key
+claim_rules:
+  # 通用 Claim 规则
+  require_evidence_for_metric: true
+  require_evidence_for_fact: true
+  allow_unsupported_recommendation: true

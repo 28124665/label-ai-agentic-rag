@@ -33,13 +33,25 @@ def _render_markdown_section(section: ReportSection, include_refs: bool = True) 
     parts = []
     parts.append(f"## {section.get('title', '未命名章节')}")
     parts.append("")
-    parts.append(section.get("content", ""))
+
+    content = section.get("content", "")
+    # 标记未经验证 / 需人工核实（在章节末尾追加）
+    if section.get("needs_human_review"):
+        content = content + "\n\n（需人工核实）"
+    parts.append(content)
     parts.append("")
 
     if include_refs and section.get("evidence_refs"):
         refs = section["evidence_refs"]
         ref_links = ", ".join(f"[{ref}](#{ref})" for ref in refs)
         parts.append(f"> **引用依据**: {ref_links}")
+        parts.append("")
+
+    # 显示该章节关联的 Claim（带"未经验证"标记）
+    claim_refs = section.get("claim_refs", []) or []
+    if claim_refs:
+        # 标注该章节包含 N 个 Claim
+        parts.append(f"> 本章节关联 {len(claim_refs)} 个 Claim")
         parts.append("")
 
     return "\n".join(parts)
@@ -185,6 +197,59 @@ def render_markdown(artifact: ReportArtifact, include_refs: bool = True) -> str:
             parts.append(f"- `{ref}`")
         parts.append("")
 
+    # 数据来源区块（按 docs §5.3）
+    data_sources = artifact.get("data_sources", []) or []
+    if data_sources:
+        parts.append("---")
+        parts.append("## 数据来源")
+        parts.append("")
+        for src in data_sources:
+            source_type = src.get("source_type", "")
+            if source_type == "db":
+                db_id = src.get("db_id", "")
+                table_name = src.get("table_name", "")
+                query_id = src.get("query_id", "")
+                used_for_list = src.get("used_by_sections", []) or []
+                used_for = "、".join(used_for_list) if used_for_list else "通用分析"
+                line = f"- 数据库：`{db_id}.{table_name}`，查询 ID：`{query_id}`，用于：{used_for}"
+            elif source_type == "rag":
+                kb_id = src.get("kb_id", "")
+                doc_title = src.get("doc_title", "")
+                doc_id = src.get("doc_id", "")
+                chunk_id = src.get("chunk_id", "")
+                used_for_list = src.get("used_by_sections", []) or []
+                used_for = "、".join(used_for_list) if used_for_list else "通用分析"
+                line = (
+                    f"- 知识库：`{kb_id}`，文档：《{doc_title}》"
+                    f"（doc_id: `{doc_id}`，chunk_id: `{chunk_id}`），用于：{used_for}"
+                )
+            else:
+                line = f"- {source_type} 来源"
+            parts.append(line)
+        parts.append("")
+
+    # Claim 列表（按 docs §4.3）
+    claims = artifact.get("claims", []) or []
+    if claims:
+        parts.append("---")
+        parts.append("## Claim 血缘")
+        parts.append("")
+        for c in claims:
+            claim_id = c.get("claim_id", "")
+            claim_type = c.get("claim_type", "")
+            text = c.get("text", "")
+            support_status = c.get("support_status", "")
+            refs = c.get("evidence_refs", []) or []
+            mark = ""
+            if support_status == "unsupported":
+                mark = "（未经验证）"
+            elif c.get("needs_human_review"):
+                mark = "（需人工核实）"
+            parts.append(
+                f"- `{claim_id}` [{claim_type}] {text[:80]}{mark} → refs: {', '.join(refs)}"
+            )
+        parts.append("")
+
     return "\n".join(parts)
 
 
@@ -210,6 +275,10 @@ th {{ background: #f5f7fa; }}
 .chart {{ background: #fafbfc; padding: 12px; margin: 16px 0; border: 1px solid #eee; }}
 .kpi {{ font-size: 1.1em; padding: 8px 0; }}
 .footnote {{ color: #888; font-size: 0.85em; margin-top: 32px; border-top: 1px solid #eee; padding-top: 16px; }}
+.unverified {{ color: #d9534f; font-size: 0.85em; font-weight: bold; }}
+.needs-review {{ color: #f0ad4e; font-size: 0.85em; font-weight: bold; }}
+.data-sources, .claim-lineage {{ background: #fafbfc; border: 1px solid #eee; padding: 8px 12px; margin: 16px 0; }}
+.data-sources summary, .claim-lineage summary {{ cursor: pointer; font-weight: bold; color: #2c3e50; }}
 </style>
 </head>
 <body>
@@ -391,6 +460,76 @@ def render_html(artifact: ReportArtifact, include_refs: bool = True) -> str:
             f"<code>{html.escape(ref)}</code>" for ref in artifact["evidence_refs"]
         )
         verification_html += f"<p>Evidence 引用: {ref_list}</p>"
+
+    # 数据来源面板（按 docs §5.3，可折叠）
+    data_sources = artifact.get("data_sources", []) or []
+    if data_sources:
+        ds_items: list[str] = []
+        for src in data_sources:
+            source_type = src.get("source_type", "")
+            if source_type == "db":
+                db_id = html.escape(str(src.get("db_id", "")))
+                table_name = html.escape(str(src.get("table_name", "")))
+                query_id = html.escape(str(src.get("query_id", "")))
+                used_for_list = src.get("used_by_sections", []) or []
+                used_for = html.escape("、".join(used_for_list)) if used_for_list else "通用分析"
+                line = (
+                    f"<li>数据库 <code>{db_id}.{table_name}</code>，"
+                    f"查询 ID <code>{query_id}</code>，用于：{used_for}</li>"
+                )
+            elif source_type == "rag":
+                kb_id = html.escape(str(src.get("kb_id", "")))
+                doc_title = html.escape(str(src.get("doc_title", "")))
+                doc_id = html.escape(str(src.get("doc_id", "")))
+                chunk_id = html.escape(str(src.get("chunk_id", "")))
+                used_for_list = src.get("used_by_sections", []) or []
+                used_for = html.escape("、".join(used_for_list)) if used_for_list else "通用分析"
+                line = (
+                    f"<li>知识库 <code>{kb_id}</code>，"
+                    f"文档《<code>{doc_title}</code>》"
+                    f"（doc_id <code>{doc_id}</code>，chunk_id <code>{chunk_id}</code>），"
+                    f"用于：{used_for}</li>"
+                )
+            else:
+                line = f"<li>{html.escape(source_type)} 来源</li>"
+            ds_items.append(line)
+        ds_html = (
+            '<details class="data-sources"><summary>数据来源</summary>'
+            f'<ul>{"".join(ds_items)}</ul></details>'
+        )
+    else:
+        ds_html = ""
+
+    # Claim 血缘面板
+    claims = artifact.get("claims", []) or []
+    if claims:
+        claim_items: list[str] = []
+        for c in claims:
+            claim_id = html.escape(str(c.get("claim_id", "")))
+            claim_type = html.escape(str(c.get("claim_type", "")))
+            text = html.escape(str(c.get("text", ""))[:80])
+            support_status = c.get("support_status", "")
+            mark = ""
+            if support_status == "unsupported":
+                mark = '<span class="unverified">（未经验证）</span>'
+            elif c.get("needs_human_review"):
+                mark = '<span class="needs-review">（需人工核实）</span>'
+            refs = c.get("evidence_refs", []) or []
+            refs_html = " ".join(
+                f"<code>{html.escape(str(r))}</code>" for r in refs
+            )
+            claim_items.append(
+                f"<li><code>{claim_id}</code> [{claim_type}] {text} {mark} → refs: {refs_html}</li>"
+            )
+        claims_html = (
+            '<details class="claim-lineage"><summary>Claim 血缘</summary>'
+            f'<ul>{"".join(claim_items)}</ul></details>'
+        )
+    else:
+        claims_html = ""
+
+    # 把 ds_html / claims_html 拼到 content 末尾
+    content_html = content_html + ds_html + claims_html
 
     html_text = HTML_TEMPLATE.format(
         language=html.escape(language),

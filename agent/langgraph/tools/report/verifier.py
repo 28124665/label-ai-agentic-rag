@@ -69,7 +69,7 @@ class ReportVerifier:
         publish_policy: dict[str, Any] | None = None,
         core_sections: list[str] | None = None,
     ) -> VerificationResult:
-        """执行 10 项检查。
+        """执行 10 项检查 + Claim Lineage Check（按 docs §4.2-4.4）。
 
         Args:
             artifact: ReportArtifact
@@ -89,11 +89,15 @@ class ReportVerifier:
         valid_evidence_ids = {ev.get("evidence_id") for ev in evidence if ev.get("evidence_id")}
 
         # ========== 检查 1: 每章节有 evidence_refs ==========
+        # 说明：recommendation 章节允许无 evidence_refs（设计文档 §4.4）
+        # - 该类型章节以"建议"为主，本身不强制要求 evidence 支撑
+        # - Verifier 在 Claim Lineage Check 中单独校验 recommendation.claim_refs
         checks_performed.append("section_has_evidence_refs")
         for section in artifact.get("sections", []) or []:
             section_id = section.get("section_id", "unknown")
+            section_type = section.get("section_type", "")
             refs = section.get("evidence_refs", []) or []
-            if not refs:
+            if not refs and section_type != "recommendation":
                 issues.append(
                     {
                         "code": "VER_SECTION_NO_REFS",
@@ -101,6 +105,12 @@ class ReportVerifier:
                         "message": f"章节「{section.get('title', section_id)}」没有任何 evidence_refs",
                         "section_id": section_id,
                     }
+                )
+            elif not refs and section_type == "recommendation":
+                # recommendation 章节无 refs 仅记 warning，不阻断验证
+                warnings.append(
+                    f"章节「{section.get('title', section_id)}」(recommendation) 无 evidence_refs，"
+                    f"建议由人工补充或标注 unsupported"
                 )
 
         # ========== 检查 2: 数字来自结构化 Evidence ==========
@@ -362,6 +372,12 @@ class ReportVerifier:
                         }
                     )
 
+        # ========== 检查 13: Claim Lineage Check（按 docs §4.2-4.4） ==========
+        claims = artifact.get("claims", []) or []
+        if claims:
+            checks_performed.append("claim_lineage_check")
+            issues.extend(self._check_claim_lineage(claims, valid_evidence_ids))
+
         # ========== 汇总 ==========
         # 任何 critical / high 级问题 → passed=False
         passed = not any(
@@ -405,3 +421,85 @@ class ReportVerifier:
         max_penalty = max(0.20 * total_checks, 1.0)  # 至少允许 5 个 high 问题
         score = max(0.0, 1.0 - penalty / max_penalty)
         return round(score, 2)
+
+    def _check_claim_lineage(
+        self,
+        claims: list[dict],
+        valid_evidence_ids: set[str],
+    ) -> list[VerificationIssue]:
+        """Claim 血缘校验（按 docs §4.2 / §4.3 / §4.4）。
+
+        检查项：
+        1. metric / comparison / trend / fact Claim 必须有 evidence_refs
+           - ClaimBuilder 已删除无 evidence 的此类型 Claim，因此这里只校验残留
+        2. recommendation 无 evidence 应被标 unsupported（不是 issue，仅 warning）
+        3. Claim.evidence_refs 中所有 evidence_id 必须存在
+        4. 低置信度 Claim 标记 needs_human_review（记入 verification_notes）
+
+        Args:
+            claims: Claim 列表
+            valid_evidence_ids: 当前有效的 evidence_id 集合
+
+        Returns:
+            list[VerificationIssue]
+        """
+        issues: list[VerificationIssue] = []
+        require_evidence_types = {"metric", "comparison", "trend", "fact"}
+        # 不再要求 evidence 的类型（仅用于记录）
+        for claim in claims or []:
+            claim_id = claim.get("claim_id", "unknown")
+            claim_type = claim.get("claim_type", "")
+            refs = claim.get("evidence_refs", []) or []
+            support_status = claim.get("support_status", "")
+
+            # 1) metric/comparison/trend/fact 无 evidence → high（ClaimBuilder 应已删除，但作为兜底）
+            if claim_type in require_evidence_types and not refs:
+                issues.append(
+                    {
+                        "code": "VER_CLAIM_MISSING_EVIDENCE",
+                        "severity": "high",
+                        "message": f"Claim {claim_id} ({claim_type}) 缺少 evidence_refs",
+                        "field": f"claim:{claim_id}",
+                    }
+                )
+
+            # 2) Claim.evidence_refs 全部存在
+            for ref in refs:
+                if ref not in valid_evidence_ids:
+                    issues.append(
+                        {
+                            "code": "VER_CLAIM_EVIDENCE_NOT_EXIST",
+                            "severity": "high",
+                            "message": f"Claim {claim_id} 引用了不存在的 evidence_id: {ref}",
+                            "field": f"claim:{claim_id}",
+                        }
+                    )
+
+            # 3) low confidence → medium 提示（已在 ClaimBuilder 中标记 needs_human_review）
+            if claim.get("needs_human_review", False):
+                issues.append(
+                    {
+                        "code": "VER_CLAIM_NEEDS_HUMAN_REVIEW",
+                        "severity": "medium",
+                        "message": (
+                            f"Claim {claim_id} 需要人工核实: {claim.get('review_reason', '')}"
+                        ),
+                        "field": f"claim:{claim_id}",
+                    }
+                )
+
+            # 4) unsupported claim（recommendation 无 evidence）→ low 提示
+            if support_status == "unsupported":
+                issues.append(
+                    {
+                        "code": "VER_CLAIM_UNSUPPORTED",
+                        "severity": "low",
+                        "message": (
+                            f"Claim {claim_id} ({claim_type}) 标记为 unsupported，"
+                            f"导出时将显示「未经验证」"
+                        ),
+                        "field": f"claim:{claim_id}",
+                    }
+                )
+
+        return issues

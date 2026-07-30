@@ -171,11 +171,15 @@ class ToolDispatcher:
         """
         extra = step.args.extra or {}
         if extra.get("data_skill_id") and extra.get("query_template_id"):
-            return await self._execute_structured_database(step, state, extra)
+            fallback_hints = await self._resolve_sql_agent_fallback(extra)
+            if fallback_hints is None:
+                return await self._execute_structured_database(step, state, extra)
+            # fallback_mode=sql_agent：模板未命中，降级到 SQL Agent 并注入 hints
+            extra = {**extra, "exploration_hints": fallback_hints}
 
-        from agent.langgraph.tools.database_tool import get_database_tool
+        from agent.langgraph.tools.sql_agent.runner import get_sql_agent_runner
 
-        db_tool = get_database_tool()
+        runner = get_sql_agent_runner()
 
         agent_config = state.get("agent_config", {}) or {}
         db_config = agent_config.get("database_config", {}) or {}
@@ -204,17 +208,58 @@ class ToolDispatcher:
             "enable_template": db_config.get("enable_template", True),
         }
 
+        # SQL Agent 扩展参数（空值不传，由 runner 兜底）
+        for key, value in {
+            "exploration_mode": db_config.get("exploration_mode"),
+            "sql_agent_config": db_config.get("sql_agent_config"),
+        }.items():
+            if value:
+                input_data[key] = value
+
         # 合并 extra 参数
         if step.args.extra:
             input_data.update(step.args.extra)
 
-        result = await db_tool.invoke(input_data)
+        result = await runner.invoke(input_data)
 
         return {
             "db_result": result,
             "db_quality_score": result.get("quality_score", 0.0),
             "db_id": db_id,
         }
+
+    async def _resolve_sql_agent_fallback(self, extra: dict) -> dict | None:
+        """判断结构化路径是否应降级到 SQL Agent（DataSkill.fallback_mode）。
+
+        策略（docs/数据库Tool渐进式披露LLM化落地设计.md §2.3 决策总序 ①）：
+        - data_skill_id + query_template_id 齐全 → 结构化路径（返回 None）
+        - query_template_id 未在 DataSkill 中声明且 fallback_mode=sql_agent
+          → 返回 exploration_hints（调用方降级到 SQL Agent）
+        - 其余情况 → 结构化路径（让 build 抛出明确错误）
+
+        Returns:
+            dict | None: exploration_hints；None 表示继续走结构化路径
+        """
+        from agent.langgraph.skills import DataSkill, SkillRegistry
+
+        data_skill = SkillRegistry().get_by_id(extra.get("data_skill_id", ""))
+        if not isinstance(data_skill, DataSkill):
+            return None
+
+        declared = {
+            t.get("template_id") for t in data_skill.query_templates
+        }
+        if extra.get("query_template_id") in declared:
+            return None
+
+        if data_skill.fallback_mode == "sql_agent" and data_skill.exploration_hints:
+            logger.info(
+                f"[ToolDispatcher] 模板 {extra.get('query_template_id')} 未在 "
+                f"DataSkill {data_skill.skill_id} 声明，fallback_mode=sql_agent，"
+                f"降级到 SQL Agent（注入 exploration_hints）"
+            )
+            return data_skill.exploration_hints
+        return None
 
     async def _execute_structured_database(
         self,
@@ -404,8 +449,10 @@ class ToolDispatcher:
         report_tool = ReportTool()
         result = await report_tool.invoke(report_input)
 
+        artifact = result.get("artifact", {}) or {}
+        # 提取 governance 字段（按 docs/报告可信治理 §4-6）
         return {
-            "report_artifacts": [result.get("artifact", {})] if result.get("success") else [],
+            "report_artifacts": [artifact] if result.get("success") else [],
             "report_summary": result.get("summary", ""),
             "report_quality_score": result.get("quality_score", 0.0),
             "report_error": result.get("error_message", ""),
@@ -413,6 +460,14 @@ class ToolDispatcher:
             "report_file_uri": result.get("file_uri", ""),
             "report_download_url": result.get("download_url", ""),
             "report_partial": result.get("partial", False),
+            # 下一期：可信治理与人机协同（按 docs §4-6）
+            "report_claims": artifact.get("claims", []) or [],
+            "report_data_sources": artifact.get("data_sources", []) or [],
+            "report_human_review": artifact.get("human_review_result", {}) or {},
+            "report_publish_status": result.get(
+                "publish_status", artifact.get("publish_status", "draft")
+            ),
+            "report_needs_human_review": result.get("needs_human_review", False),
         }
 
 

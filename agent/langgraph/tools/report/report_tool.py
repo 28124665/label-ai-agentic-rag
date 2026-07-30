@@ -38,12 +38,20 @@ from agent.langgraph.skills import (
 )
 from agent.langgraph.skills.models import SkillResolveContext
 from agent.langgraph.tools.report.chart_builder import ChartBuilder
+from agent.langgraph.tools.report.claims import ClaimBuilder
+from agent.langgraph.tools.report.data_sources import (
+    DataSourceCollector,
+    build_source_summary,
+)
 from agent.langgraph.tools.report.exporter import ReportExporter
 from agent.langgraph.tools.report.generator import SectionGenerator
+from agent.langgraph.tools.report.human_review import HumanReviewNode
 from agent.langgraph.tools.report.models import (
     ReportArtifact,
+    ReportFormat,
     ReportToolInput,
     ReportToolOutput,
+    ReportType,
 )
 from agent.langgraph.tools.report.planner import ReportPlanner
 from agent.langgraph.tools.report.storage import (
@@ -68,6 +76,9 @@ REPORT_VERIFICATION_FAILED = "REPORT_VERIFICATION_FAILED"
 REPORT_EXPORT_FAILED = "REPORT_EXPORT_FAILED"
 REPORT_STORAGE_FAILED = "REPORT_STORAGE_FAILED"
 REPORT_PERMISSION_DENIED = "REPORT_PERMISSION_DENIED"
+# 下一期：人机协同错误码（按 docs §6.4）
+REPORT_PUBLISH_PENDING = "REPORT_PUBLISH_PENDING"  # 报告进入人工审核待审状态
+REPORT_REJECTED = "REPORT_REJECTED"  # 报告被人工驳回
 
 
 # 允许的 report_type 与 report_format
@@ -114,8 +125,22 @@ class ReportTool:
         self._table_builder = TableBuilder(
             max_rows=self._config.get("max_table_rows", 100)
         )
+        self._claim_builder = ClaimBuilder(
+            low_confidence_threshold=self._config.get("low_confidence_threshold", 0.7),
+        )
+        self._data_source_collector = DataSourceCollector()
         self._verifier = ReportVerifier(self._config)
         self._exporter = ReportExporter()
+        self._human_review = HumanReviewNode(
+            config={
+                "low_confidence_threshold": self._config.get(
+                    "low_confidence_threshold", 0.7
+                ),
+                "low_confidence_ratio_threshold": self._config.get(
+                    "low_confidence_ratio_threshold", 0.3
+                ),
+            }
+        )
         self._storage = storage or LocalArtifactStorage(
             root_path=self._config.get("storage_root", "./reports"),
             download_base_url=self._config.get("download_base_url", "/api/v1/reports"),
@@ -247,9 +272,53 @@ class ReportTool:
                 charts, tables, skill_set.report_skill.metric_definitions
             )
 
+        # ========== Step 4.5: Build Claims (按 docs §4.2) ==========
+        # 必须在 verifier/exporter 之前生成 Claim，以便 verifier 校验、exporter 展示
+        claims = self._claim_builder.build(
+            sections=sections,
+            charts=charts,
+            tables=tables,
+            evidence_list=evidence,
+        )
+
+        # ========== Step 4.6: Collect Data Sources (按 docs §5.1) ==========
+        data_sources = self._data_source_collector.collect(
+            evidence_list=evidence,
+            sections=sections,
+            charts=charts,
+            tables=tables,
+            claims=claims,
+        )
+        # source_summary：人类可读摘要（按 docs §5.2）
+        source_summary = build_source_summary(
+            data_sources=data_sources,
+            sections=sections,
+        )
+
         # ========== Step 5: Build Artifact ==========
         report_id = generate_report_id()
         now_iso = datetime.utcnow().isoformat() + "Z"
+
+        # HumanReview 评估（按 docs §6.3）：先评估再写 artifact，便于后续 verifier
+        # 决定是否进入人工审核以及 publish_status 初值
+        publish_policy = (
+            skill_set.report_skill.publish_policy if skill_set else None
+        )
+        # 高敏判定基于 report_type（财报/成本/质量/EHS/人事）
+        skill_type = effective_input.get("report_type", "")
+        publish_status, publish_reason, human_review_result = (
+            self._human_review.evaluate(
+                artifact={
+                    "claims": claims,
+                    "sections": sections,
+                    "charts": charts,
+                    "tables": tables,
+                    "publish_status": "draft",
+                },
+                publish_policy=publish_policy,
+                skill_type=skill_type,
+            )
+        )
 
         artifact: ReportArtifact = {
             "report_id": report_id,
@@ -265,13 +334,21 @@ class ReportTool:
             "tables": tables,
             "appendix": [],
             "evidence_refs": self._collect_evidence_refs(sections, charts, tables),
-            "source_summary": [],
+            # 下一期：Claim / DataSources / HumanReview
+            "claims": claims,
+            "data_sources": data_sources,
+            "source_summary": source_summary,
+            "human_review_result": human_review_result,
+            "publish_status": publish_status,
+            "publish_status_reason": publish_reason,
             "verification_result": {},
             "metadata": {
                 "generation_time_ms": int((time.time() - generation_start) * 1000),
                 "section_count": len(sections),
                 "chart_count": len(charts),
                 "table_count": len(tables),
+                "claim_count": len(claims),
+                "data_source_count": len(data_sources),
                 "skill_id": skill_set.report_skill.skill_id if skill_set else None,
                 "skill_version": skill_set.report_skill.version if skill_set else None,
             },
@@ -329,10 +406,16 @@ class ReportTool:
                 "download_url": "",
                 "partial": True,
                 "publish_mode": "partial",
+                "publish_status": artifact.get("publish_status", "draft"),
+                "needs_human_review": (
+                    artifact.get("publish_status") == "pending_review"
+                ),
                 "missing_required_evidence": [],
             }
 
         # ========== Step 8: Export ==========
+        # 草稿/待审核/被驳回的报告仍生成内容（便于人工查看），但 download_url 置空
+        is_public_publish = publish_status in ("approved", "published")
         export_start = time.time()
         try:
             content, extension = self._exporter.export(
@@ -358,11 +441,18 @@ class ReportTool:
                 "download_url": "",
                 "partial": True,
                 "publish_mode": "partial",
+                "publish_status": publish_status,
+                "needs_human_review": publish_status == "pending_review",
                 "missing_required_evidence": [],
             }
         export_time_ms = int((time.time() - export_start) * 1000)
 
         # ========== Step 9: Store ==========
+        # 草稿/待审核/被驳回状态下：仍存到 storage 但 download_url 置空
+        # 这样管理员/审核员可以内部查看
+        file_uri = ""
+        file_size = 0
+        download_url = ""
         try:
             storage_result = self._storage.save(
                 tenant_id=artifact["tenant_id"] or "unknown",
@@ -370,8 +460,16 @@ class ReportTool:
                 content=content,
                 extension=extension,
             )
-            artifact["file_uri"] = storage_result["file_uri"]
-            artifact["file_size_bytes"] = storage_result["file_size_bytes"]
+            file_uri = storage_result["file_uri"]
+            file_size = storage_result["file_size_bytes"]
+            if is_public_publish:
+                download_url = storage_result["download_url"]
+            else:
+                # 草稿 / 待审核 / 驳回状态下不暴露公开下载链接
+                # 但仍可由内部 token 访问 storage_result["file_uri"]
+                download_url = ""
+            artifact["file_uri"] = file_uri
+            artifact["file_size_bytes"] = file_size
         except Exception as e:
             logger.error(f"[ReportTool] 存储失败: {e}")
             return {
@@ -391,14 +489,40 @@ class ReportTool:
                 "download_url": "",
                 "partial": True,
                 "publish_mode": "partial",
+                "publish_status": publish_status,
+                "needs_human_review": publish_status == "pending_review",
                 "missing_required_evidence": [],
             }
 
+        # ========== Step 9.5: 最终 publish_status 决策 ==========
+        # 当前实现：HumanReview.evaluate 已确定初值，存储成功后保持
+        # 如需在保存后再次校验 publish_status，可在此重置
+        # 例如：存储失败 → 保持 pending_review 不变
+        final_publish_status = publish_status
+        if publish_status == "approved":
+            # 已通过审核的报告：保存成功后转为 published
+            final_publish_status = "published"
+            artifact["publish_status"] = final_publish_status
+
         # ========== Step 10: Success Output ==========
+        # 根据 publish_status 决定 success / error_code
+        # 草稿/待审核/驳回：success=False（无正式输出），但 success=True 可保留
+        # 这里选择 success=True（报告已生成），但通过 error_code 标记状态
+        is_pending_review = final_publish_status == "pending_review"
+        is_rejected = final_publish_status == "rejected"
+
         return {
             "success": True,
-            "error_message": "",
-            "error_code": "",
+            "error_message": (
+                f"报告进入人工审核（{publish_reason}）" if is_pending_review
+                else f"报告被驳回: {publish_reason}" if is_rejected
+                else ""
+            ),
+            "error_code": (
+                REPORT_PUBLISH_PENDING if is_pending_review
+                else REPORT_REJECTED if is_rejected
+                else ""
+            ),
             "artifact": artifact,
             "summary": artifact["summary"],
             "quality_score": verification_result["score"],
@@ -408,10 +532,12 @@ class ReportTool:
             "evidence_count": len(evidence),
             "generation_time_ms": generation_time_ms,
             "export_time_ms": export_time_ms,
-            "file_uri": storage_result["file_uri"],
-            "download_url": storage_result["download_url"],
-            "partial": artifact.get("partial", False),
-            "publish_mode": "partial" if artifact.get("partial", False) else "full",
+            "file_uri": file_uri,
+            "download_url": download_url,
+            "partial": artifact.get("partial", False) or is_pending_review,
+            "publish_mode": "partial" if (artifact.get("partial", False) or is_pending_review) else "full",
+            "publish_status": final_publish_status,
+            "needs_human_review": is_pending_review,
             "missing_required_evidence": [],
         }
 

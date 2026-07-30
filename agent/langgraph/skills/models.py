@@ -65,6 +65,14 @@ class DataSkill(SkillBase):
     evidence_requirements: list[dict[str, Any]] = Field(default_factory=list)
     policy_constraints: dict[str, Any] = Field(default_factory=dict)
     validation_rules: list[dict[str, Any]] = Field(default_factory=list)
+    # SQL Agent 协作接口（docs/数据库Tool渐进式披露LLM化落地设计.md §5.3）：
+    # exploration_hints — 无匹配 query_template 且允许探索时，注入 SQL Agent
+    #   System Prompt 的业务域提示（preferred_tables / metric_bindings /
+    #   table_aliases / business_glossary）
+    # fallback_mode — 有 DataSkill 但无匹配 query_template 时：
+    #   "sql_agent" = 降级到 SQL Agent 探索（注入 hints）；"reject" = 拒绝（默认）
+    exploration_hints: dict[str, Any] = Field(default_factory=dict)
+    fallback_mode: Literal["sql_agent", "reject"] = "reject"
 
 
 class RetrievalSkill(SkillBase):

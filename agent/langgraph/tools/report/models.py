@@ -101,6 +101,12 @@ class ReportToolOutput(TypedDict, total=False):
     partial: bool  # 是否部分成功（部分章节生成）
     publish_mode: Literal["full", "partial", "summary_only"]
     missing_required_evidence: list[str]
+    # 下一期：人机协同（按 docs §6）
+    publish_status: str  # PublishStatus：draft / pending_review / approved / published / rejected
+    needs_human_review: bool  # 标记是否需要人工审核（前端据此显示 UI）
+    # 错误码扩展
+    # REPORT_PUBLISH_PENDING: 进入人工审核待审
+    # REPORT_REJECTED: 被人工驳回
 
 
 class ReportArtifact(TypedDict, total=False):
@@ -130,6 +136,13 @@ class ReportArtifact(TypedDict, total=False):
     partial: bool
     failed_sections: list[str]
     coverage_score: float
+    # ===== 下一期：Claim / 数据来源 / 人审（按 docs §4-6） =====
+    claims: list[dict]  # list[Claim]
+    data_sources: list[dict]  # list[DataSourceRef]
+    source_summary: list[dict]  # list[SourceSummaryEntry]
+    human_review_result: dict  # HumanReviewResult
+    publish_status: str  # PublishStatus
+    publish_status_reason: str
 
 
 class ReportSection(TypedDict, total=False):
@@ -143,6 +156,7 @@ class ReportSection(TypedDict, total=False):
     evidence_refs: list[str]
     chart_refs: list[str]
     table_refs: list[str]
+    claim_refs: list[str]  # 下一期：章节绑定的 Claim
     confidence: float
     llm_call_id: Optional[str]  # 用于审计
 
@@ -159,6 +173,7 @@ class ChartSpec(TypedDict, total=False):
     series: list[dict]
     data: list[dict]
     evidence_refs: list[str]
+    claim_refs: list[str]  # 下一期：图表绑定的 Claim
     unit: str
     notes: str
 
@@ -171,6 +186,7 @@ class TableSpec(TypedDict, total=False):
     columns: list[str]
     rows: list[list[Any]]
     evidence_refs: list[str]
+    claim_refs: list[str]  # 下一期：表格绑定的 Claim
     max_rows: int
 
 
@@ -209,3 +225,118 @@ class ReportPlan(TypedDict, total=False):
     estimated_charts: int
     estimated_tables: int
     warnings: list[str]
+
+
+# ========== 下一期：Claim / DataSources / HumanReview ==========
+ClaimType = Literal["fact", "metric", "comparison", "trend", "recommendation"]
+"""Claim 类型。"""
+
+SupportStatus = Literal[
+    "pending", "supported", "partially_supported", "unsupported"
+]
+"""Claim 支撑状态。"""
+
+PublishStatus = Literal[
+    "draft", "pending_review", "approved", "published", "rejected"
+]
+"""报告发布状态（按 docs §6）。"""
+
+
+class EvidenceSourceSummary(TypedDict, total=False):
+    """Evidence 血缘摘要（嵌入到 Claim.evidence_sources 中）。
+
+    比完整 provenance 更轻量，便于在报告中展示。
+    """
+
+    evidence_id: str
+    source_type: Literal["db", "rag", "web", "report"]
+    db_id: str
+    table_name: str
+    query_id: str
+    rows_used: int
+    kb_id: str
+    doc_id: str
+    chunk_id: str
+    doc_title: str
+
+
+class Claim(TypedDict, total=False):
+    """声明 / 论点血缘对象（按 docs §4.2）。
+
+    血缘链路：
+    Claim.evidence_refs → Evidence → metadata.provenance → DB / RAG 原始来源
+    """
+
+    claim_id: str
+    text: str
+    claim_type: ClaimType
+
+    # 血缘
+    evidence_refs: list[str]
+    evidence_sources: list[EvidenceSourceSummary]
+
+    # 校验
+    support_status: SupportStatus
+    verification_notes: list[str]
+    confidence: float
+    needs_human_review: bool
+    review_reason: str
+
+
+class DataSourceRef(TypedDict, total=False):
+    """报告数据来源引用（按 docs §5.1）。
+
+    用于 ReportArtifact.data_sources 与 Markdown/HTML "数据来源" 区块。
+    """
+
+    source_id: str
+    source_type: Literal["db", "rag", "web"]
+    # DB
+    db_id: str
+    table_name: str
+    query_id: str
+    query_template_id: str
+    row_count: int
+    # RAG
+    kb_id: str
+    doc_id: str
+    chunk_id: str
+    doc_title: str
+    doc_uri: str
+    # 使用关系（双向引用）
+    used_by_sections: list[str]
+    used_by_charts: list[str]
+    used_by_tables: list[str]
+    used_by_claims: list[str]
+
+
+class SourceSummaryEntry(TypedDict, total=False):
+    """人类可读的数据来源摘要项（按 docs §5.2）。"""
+
+    label: str
+    source: str
+    query_id: str
+    used_for: list[str]
+
+
+class HumanReviewAction(TypedDict, total=False):
+    """单条审核记录。"""
+
+    reviewer_id: str
+    action: Literal["approve", "reject", "edit", "comment", "request_regenerate"]
+    comment: str
+    edited_content: str
+    created_at: str
+
+
+class HumanReviewResult(TypedDict, total=False):
+    """人工审核结果（按 docs §6.2）。"""
+
+    action: Literal["approve", "reject", "edit", "comment", "request_regenerate"]
+    reviewer_id: str
+    reviewed_at: str
+    comments: list[dict]
+    edited_sections: list[dict]
+    approved: bool
+    publish_allowed: bool
+    actions: list[HumanReviewAction]

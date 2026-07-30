@@ -28,6 +28,13 @@ import hashlib
 import time
 from typing import Any, Literal, Optional, TypedDict
 
+from agent.langgraph.evidence.provenance import (
+    EvidenceProvenance,
+    attach_provenance_to_evidence,
+    build_db_provenance,
+    build_rag_provenance,
+)
+
 
 class Evidence(TypedDict, total=False):
     """标准化证据数据结构。
@@ -175,6 +182,17 @@ def normalize_rag_evidence(
                 "query": query,
             },
         }
+        # 写入 RAG 血缘（按 docs §4.1）
+        rag_prov: EvidenceProvenance = build_rag_provenance(
+            kb_id=kb_id,
+            doc_id=doc_id,
+            chunk_id=chunk_id,
+            doc_title=doc.get("title", ""),
+            doc_uri=doc.get("doc_uri", "") or doc.get("uri", ""),
+            retrieval_query=query,
+            step_id=doc.get("step_id", ""),
+        )
+        attach_provenance_to_evidence(ev, rag_prov)
         evidences.append(ev)
     return evidences
 
@@ -250,6 +268,26 @@ def normalize_db_evidence(
             "natural_query": query,
         },
     }
+    # 写入 DB 血缘（按 docs §4.1）
+    db_id = source or (tables[0].split(".")[0] if tables else "")
+    table_name = tables[0] if tables else ""
+    # 行键：取第一列前 N 个值
+    row_keys: list[str] = []
+    if rows:
+        first_col = list(rows[0].keys())[0] if rows else ""
+        for r in rows[:20]:
+            v = r.get(first_col, "") if isinstance(r, dict) else ""
+            if v != "":
+                row_keys.append(f"{first_col}={v}")
+    db_prov: EvidenceProvenance = build_db_provenance(
+        db_id=db_id,
+        table_name=table_name,
+        query_id=db_result.get("query_id", ""),
+        sql_fingerprint=db_result.get("sql_fingerprint", ""),
+        row_keys=row_keys,
+        step_id=db_result.get("step_id", ""),
+    )
+    attach_provenance_to_evidence(ev, db_prov)
     return [ev]
 
 

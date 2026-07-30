@@ -258,6 +258,18 @@ class AgentState(TypedDict, total=False):
     report_download_url: str
     report_partial: bool
 
+    # ========== 报告可信治理与人机协同（按 docs §4-6） ==========
+    # report_claims: list[dict]        — 报告 Claim 列表（含 evidence_refs / support_status）
+    # report_data_sources: list[dict]  — 报告数据来源列表（DataSourceRef）
+    # report_human_review: dict        — 人工审核结果（HumanReviewResult）
+    # report_publish_status: str       — 发布状态（draft / pending_review / approved / published / rejected）
+    # report_needs_human_review: bool  — 标记是否需要人工审核（前端据此显示 UI）
+    report_claims: list[dict]
+    report_data_sources: list[dict]
+    report_human_review: dict
+    report_publish_status: str
+    report_needs_human_review: bool
+
     # ========== Skill 运行时 ==========
     skill_set: dict | None
     skill_resolution: dict | None
