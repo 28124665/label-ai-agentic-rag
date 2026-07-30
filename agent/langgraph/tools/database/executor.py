@@ -9,7 +9,7 @@ from typing import Any
 
 from agent.langgraph.tools.database.models import DBQueryResult, StructuredQuery
 from agent.langgraph.tools.database.policy import StructuredQueryPolicy
-from agent.langgraph.tools.database_tool import get_database_tool
+from agent.langgraph.tools.db_runtime import get_db_runtime
 
 ExecuteSql = Callable[[str, str, dict[str, Any]], list[dict]]
 
@@ -19,7 +19,7 @@ class BackendUnavailableError(RuntimeError):
 
 
 class DatabaseToolStructuredBackend:
-    """Adapt the existing MCP-backed DatabaseTool to structured SQL execution."""
+    """Adapt the shared DbRuntime (MCP-backed) to structured SQL execution."""
 
     def __init__(self, tenant_id: str, mcp_server_name: str) -> None:
         self._tenant_id = tenant_id
@@ -28,11 +28,11 @@ class DatabaseToolStructuredBackend:
     async def __call__(
         self, db_id: str, sql: str, params: dict[str, Any]
     ) -> list[dict]:
-        """Initialize the existing MCP session and execute rendered SQL."""
-        database_tool = get_database_tool()
+        """Initialize the shared MCP session and execute rendered SQL."""
+        db_runtime = get_db_runtime()
         try:
-            database_tool._init_mcp_session(self._tenant_id, self._mcp_server_name)
-            rows = database_tool._execute_sql(
+            db_runtime.init_session(self._tenant_id, self._mcp_server_name)
+            rows = db_runtime.execute_sql(
                 db_id, self._render_sql_parameters(sql, params)
             )
             if isawaitable(rows):

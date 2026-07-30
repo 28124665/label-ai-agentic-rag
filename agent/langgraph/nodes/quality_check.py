@@ -74,6 +74,24 @@ async def quality_check_node(state: AgentState) -> dict[str, Any]:
         # 数据库查询：只要返回有效行数即视为相关，不强制要求 >= 2 行
         has_relevant = db_result.get("row_count", 0) > 0
         relevant_count = db_result.get("row_count", 0)
+
+        # SQL Agent 探索终态适配（docs/数据库Tool渐进式披露LLM化落地设计.md §5.2）：
+        # 空结果语义分化，消除无意义重试
+        exploration_verdict = db_result.get("exploration_verdict", "")
+        if exploration_verdict:
+            decision = _decide_by_verdict(exploration_verdict, retry_count, max_retries)
+            if decision is not None:
+                logger.info(
+                    f"[quality_check] DB 探索终态决策: verdict={exploration_verdict}, "
+                    f"decision={decision}, retry={retry_count}/{max_retries}"
+                )
+                updates: dict[str, Any] = {
+                    "quality_decision": decision,
+                    "node_timings": {"quality_check": int((time.time() - start_time) * 1000)},
+                }
+                if decision == "retry_db":
+                    updates["retry_count"] = retry_count + 1
+                return updates
     elif route_target == "hybrid":
         rag_score = state.get("rag_quality_score", 0.0)
         db_score = state.get("db_quality_score", 0.0)
@@ -106,6 +124,36 @@ async def quality_check_node(state: AgentState) -> dict[str, Any]:
         updates["retry_count"] = retry_count + 1
 
     return updates
+
+
+def _decide_by_verdict(
+    exploration_verdict: str,
+    retry_count: int,
+    max_retries: int,
+) -> str | None:
+    """按 SQL Agent 探索终态决策（docs §5.2）。
+
+    Args:
+        exploration_verdict: 探索终态（data_found / no_data_confirmed /
+            exploration_failed / budget_exhausted）
+        retry_count: 当前重试次数
+        max_retries: 最大重试次数
+
+    Returns:
+        str | None: 决策结果；None 表示该 verdict 不改变默认决策流程
+    """
+    if exploration_verdict == "data_found":
+        return "pass"
+    if exploration_verdict == "no_data_confirmed":
+        # LLM 确认库中无数据：不重试，由 prompt 层生成"未查询到数据"话术
+        return "pass"
+    if exploration_verdict == "exploration_failed":
+        # 探索过程出错：受 retry_count 限制重试
+        return "retry_db" if retry_count < max_retries else "fallback_web"
+    if exploration_verdict == "budget_exhausted":
+        # 预算已耗尽：不再重试（重试只会再次耗尽），降级 web 或保守回答
+        return "fallback_web"
+    return None
 
 
 def _make_decision(

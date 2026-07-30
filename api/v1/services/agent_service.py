@@ -43,7 +43,7 @@ class AgentService:
             tools_config=data.tools_config,
             routing_config=data.routing_config,
             degradation_config=data.degradation_config,
-            model_config=data.model_config,
+            model_config=data.model_cfg,
             is_active=True
         )
         
@@ -143,8 +143,8 @@ class AgentService:
             agent.routing_config = update_data.routing_config
         if update_data.degradation_config is not None:
             agent.degradation_config = update_data.degradation_config
-        if update_data.model_config is not None:
-            agent.model_config = update_data.model_config
+        if update_data.model_cfg is not None:
+            agent.model_config = update_data.model_cfg
         if update_data.is_active is not None:
             agent.is_active = update_data.is_active
         

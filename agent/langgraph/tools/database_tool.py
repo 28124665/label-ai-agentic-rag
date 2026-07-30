@@ -13,11 +13,17 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
-"""Database Tool 封装模块 - LangGraph 版本。
+"""Database Tool 封装模块 - LangGraph 版本（legacy 启发式探索规则流水线）。
 
-将历史 RAGFlow 数据库查询能力（多 Tool 调度、渐进式 Schema 发现、
-模板匹配、NL-to-SQL、自愈重试、结果格式化）封装为独立工具类，
-供 LangGraph 调用。
+.. deprecated::
+    本模块的启发式探索规则流水线（_route_by_intent / _filter_relevant_tables /
+    _generate_rule_sql）已 deprecated，仅作为 SqlAgentRunner 的应急回滚
+    （exploration_mode=legacy）与 A/B 质量基线保留一个版本周期。
+    新代码请使用 agent.langgraph.tools.sql_agent.SqlAgentRunner。
+
+说明（docs/数据库Tool渐进式披露LLM化落地设计.md §2.3）：
+- TemplateMatcher 属于"确定性知识路径"，保留并前置，不属于废弃范围
+- 原子能力（MCP 会话/SQL 校验/执行/格式化）已抽取到 DbRuntime，本类委托之
 
 参考原有实现：
 - agent/tools/database_common.py: DatabaseToolBase 基类
@@ -27,8 +33,6 @@
 - docs/dbtoolprd.md: 数据库 Tool 设计文档
 """
 
-import asyncio
-import json
 import logging
 import os
 import re
@@ -38,8 +42,7 @@ from typing import Any, Literal, Optional, TypedDict
 
 import yaml
 
-from common.mcp_tool_call_conn import MCPToolCallSession
-from api.db.services.mcp_server_service import MCPServerService
+from agent.langgraph.tools.db_runtime import DbRuntime, get_db_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +100,7 @@ class QueryTemplate:
 
 
 class TemplateMatcher:
-    """预定义查询模板匹配器。"""
+    """预定义查询模板匹配器（确定性知识路径，保留并前置）。"""
 
     def __init__(self, config_path: str = "conf/query_templates.yaml"):
         self._config_path = config_path
@@ -219,7 +222,7 @@ class TemplateMatcher:
 
 
 class ExploreCounter:
-    """Schema 探查频次限制器。"""
+    """Schema 探查频次限制器（legacy 流水线使用）。"""
 
     def __init__(self, max_list_tables: int = 3, max_describe_table: int = 3):
         self._max_list_tables = max_list_tables
@@ -244,20 +247,24 @@ class ExploreCounter:
 
 
 class DatabaseTool:
-    """数据库查询工具 - LangGraph 版本。
+    """数据库查询工具 - LangGraph 版本（legacy 启发式探索规则流水线）。
 
-    将历史 RAGFlow 数据库查询能力封装为独立工具：
-    1. 意图路由（根据用户问题匹配目标数据库）
-    2. 混合模式（预定义模板 + NL-to-SQL）
-    3. 渐进式 Schema 发现（list_tables → describe_table）
-    4. SQL 安全检查（只读 + 黑名单）
+    .. deprecated::
+        启发式探索规则流水线已废弃，仅作应急回滚与 A/B 基线。
+        默认入口已切换为 agent.langgraph.tools.sql_agent.SqlAgentRunner。
+
+    历史能力：
+    1. 意图路由（根据用户问题匹配目标数据库）— 启发式规则，deprecated
+    2. 混合模式（预定义模板 + NL-to-SQL）— 模板部分保留为确定性知识路径
+    3. 渐进式 Schema 发现（list_tables → describe_table）— 关键词筛表，deprecated
+    4. SQL 安全检查（只读 + 黑名单）— 委托 DbRuntime
     5. SQL 执行（带自愈重试）
-    6. 结果格式化（Markdown 表格 + 自然语言）
+    6. 结果格式化（Markdown 表格 + 自然语言）— 委托 DbRuntime
     """
 
     component_name = "DatabaseTool"
 
-    # 业务关键词库，用于意图路由和表筛选
+    # 业务关键词库，用于意图路由和表筛选（启发式探索规则，deprecated）
     BUSINESS_KEYWORDS = [
         "产量", "产出", "output", "production",
         "成本", "cost", "采购", "purchase",
@@ -267,15 +274,30 @@ class DatabaseTool:
         "订单", "销售", "sale", "revenue", "营收",
     ]
 
-    def __init__(self):
-        self._mcp_session: Optional[MCPToolCallSession] = None
-        self._db_tools: dict[str, dict[str, Any]] = {}
-        self._db_config: dict[str, Any] = {}
+    def __init__(self, runtime: Optional[DbRuntime] = None):
+        self._runtime = runtime or get_db_runtime()
         self._template_matcher = TemplateMatcher()
         self._explore_counter = ExploreCounter()
 
+    # ========== DbRuntime 状态透传（保持历史私有属性兼容） ==========
+    @property
+    def _db_tools(self) -> dict[str, dict[str, Any]]:
+        return self._runtime.db_tools
+
+    @_db_tools.setter
+    def _db_tools(self, value: dict[str, dict[str, Any]]) -> None:
+        self._runtime._db_tools = value
+
+    @property
+    def _db_config(self) -> dict[str, Any]:
+        return self._runtime.db_config
+
+    @_db_config.setter
+    def _db_config(self, value: dict[str, Any]) -> None:
+        self._runtime._db_config = value
+
     async def invoke(self, input_data: DatabaseToolInput) -> DatabaseToolOutput:
-        """执行数据库查询流程。"""
+        """执行数据库查询流程（legacy 启发式探索规则流水线）。"""
         start_time = time.time()
         query = input_data.get("query", "")
         query_simplified = input_data.get("query_simplified", "") or query
@@ -396,49 +418,59 @@ class DatabaseTool:
             formatted_result=formatted_result,
         )
 
+    # ========== 委托 DbRuntime 的原子方法（保持私有签名兼容） ==========
     def _load_db_config(self, config_path: str) -> None:
-        """加载数据库配置文件。"""
-        if not os.path.exists(config_path):
-            logger.warning(f"[DatabaseTool] 配置文件不存在: {config_path}")
-            return
-
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f)
-                self._db_config = config.get("databases", {})
-                logger.info(f"[DatabaseTool] 加载数据库配置: {list(self._db_config.keys())}")
-        except Exception as e:
-            logger.error(f"[DatabaseTool] 加载数据库配置失败: {e}")
+        """加载数据库配置文件（委托 DbRuntime）。"""
+        self._runtime.load_db_config(config_path)
 
     def _init_mcp_session(self, tenant_id: str, mcp_server_name: str) -> None:
-        """初始化 MCP 会话并获取可用 Tool 列表。"""
-        _, mcp_server = MCPServerService.get_by_name_and_tenant(mcp_server_name, tenant_id)
-        if not mcp_server:
-            raise Exception(f"MCP Server not found: {mcp_server_name}")
-
-        self._mcp_session = MCPToolCallSession(mcp_server)
-
-        tools = self._mcp_session.get_tools()
-        for tool in tools:
-            if tool.name.startswith("query_") or \
-               tool.name.startswith("list_tables_") or \
-               tool.name.startswith("describe_table_"):
-                parts = tool.name.split("_", 1)
-                if len(parts) > 1:
-                    self._db_tools[tool.name] = {
-                        "description": tool.description,
-                        "db_id": parts[1],
-                    }
-
-        logger.info(f"[DatabaseTool] 加载 {len(self._db_tools)} 个数据库工具")
+        """初始化 MCP 会话并获取可用 Tool 列表（委托 DbRuntime）。"""
+        self._runtime.init_session(tenant_id, mcp_server_name)
 
     def _validate_database(self, db_id: str) -> bool:
-        """验证数据库是否存在。"""
-        return f"query_{db_id}" in self._db_tools
+        """验证数据库是否存在（委托 DbRuntime）。"""
+        return self._runtime.validate_database(db_id)
 
+    async def _list_tables(self, db_id: str) -> list[str]:
+        """获取数据库表清单（委托 DbRuntime，返回表名列表）。"""
+        entries = await self._runtime.list_tables(db_id)
+        return [entry["table_name"] for entry in entries if entry.get("table_name")]
+
+    async def _describe_table(self, db_id: str, table_name: str) -> dict:
+        """获取表结构详情（委托 DbRuntime）。"""
+        return await self._runtime.describe_table(db_id, table_name)
+
+    def _validate_sql(self, sql: str) -> None:
+        """校验 SQL 只读性（委托 DbRuntime）。"""
+        self._runtime.validate_sql(sql)
+
+    async def _execute_sql(self, db_id: str, sql: str) -> list[dict]:
+        """执行 SQL 查询（委托 DbRuntime）。"""
+        return await self._runtime.execute_sql(db_id, sql)
+
+    def _extract_tables(self, sql: str) -> list[str]:
+        """从 SQL 中提取表名（委托 DbRuntime）。"""
+        return DbRuntime.extract_tables(sql)
+
+    def _format_result(
+        self,
+        rows: list[dict],
+        sql: str,
+        db_id: str,
+        tables: list[str],
+        query_lang: str,
+    ) -> str:
+        """格式化查询结果（委托 DbRuntime）。"""
+        return DbRuntime.format_rows(rows, sql, db_id, tables, query_lang)
+
+    def _get_chat_model(self, tenant_id: str, llm_id: str) -> Optional[Any]:
+        """获取 Chat 模型（委托 DbRuntime）。"""
+        return self._runtime.get_chat_model(tenant_id, llm_id)
+
+    # ========== legacy 启发式探索规则（deprecated，仅回滚/基线保留） ==========
     def _route_by_intent(self, query: str) -> Optional[str]:
         """
-        根据用户意图路由到目标数据库。
+        根据用户意图路由到目标数据库（启发式关键词规则，deprecated）。
 
         匹配策略：
         1. 提取查询中的业务关键词
@@ -464,11 +496,7 @@ class DatabaseTool:
 
     def _get_available_databases(self) -> list[str]:
         """获取可用数据库 ID 列表。"""
-        db_ids = set()
-        for tool_name, tool_info in self._db_tools.items():
-            if tool_name.startswith("query_"):
-                db_ids.add(tool_info.get("db_id", ""))
-        return sorted([d for d in db_ids if d])
+        return [db["db_id"] for db in self._runtime.list_databases()]
 
     async def _progressive_schema_discovery(
         self,
@@ -478,7 +506,7 @@ class DatabaseTool:
         log: list[str],
     ) -> dict[str, Any]:
         """
-        渐进式 Schema 发现。
+        渐进式 Schema 发现（legacy 关键词筛表版，deprecated）。
 
         步骤：
         1. 调用 list_tables_{db_id} 获取表名清单
@@ -510,50 +538,8 @@ class DatabaseTool:
         logger.info(f"[DatabaseTool] 获取到 {len(schema)} 张表的结构")
         return schema
 
-    async def _list_tables(self, db_id: str) -> list[str]:
-        """获取数据库表清单。"""
-        list_tool_name = f"list_tables_{db_id}"
-        if list_tool_name not in self._db_tools:
-            raise Exception(f"数据库 {db_id} 不存在或无权访问")
-
-        tables_result = await asyncio.to_thread(
-            self._mcp_session.tool_call,
-            name=list_tool_name,
-            arguments={},
-        )
-
-        if tables_result.startswith("MCP server error") or tables_result.startswith("Error"):
-            raise Exception(f"获取表清单失败: {tables_result}")
-
-        try:
-            tables_data = json.loads(tables_result)
-            return tables_data.get("tables", [])
-        except (json.JSONDecodeError, TypeError):
-            return [line.strip() for line in tables_result.split("\n") if line.strip()]
-
-    async def _describe_table(self, db_id: str, table_name: str) -> dict:
-        """获取表结构详情。"""
-        describe_tool_name = f"describe_table_{db_id}"
-        if describe_tool_name not in self._db_tools:
-            raise Exception(f"数据库 {db_id} 不存在或无权访问")
-
-        table_schema_result = await asyncio.to_thread(
-            self._mcp_session.tool_call,
-            name=describe_tool_name,
-            arguments={"table_name": table_name},
-        )
-
-        if table_schema_result.startswith("MCP server error") or \
-           table_schema_result.startswith("Error"):
-            raise Exception(f"获取表结构失败: {table_schema_result}")
-
-        try:
-            return json.loads(table_schema_result)
-        except (json.JSONDecodeError, TypeError):
-            return {"raw": table_schema_result}
-
     def _filter_relevant_tables(self, query: str, tables: list[str], max_tables: int) -> list[str]:
-        """根据查询关键词筛选最相关的表。"""
+        """根据查询关键词筛选最相关的表（启发式规则，deprecated）。"""
         query_lower = query.lower()
         query_keywords = [kw for kw in self.BUSINESS_KEYWORDS if kw in query_lower]
 
@@ -594,7 +580,7 @@ class DatabaseTool:
         return sql
 
     def _generate_rule_sql(self, query: str, schema: dict[str, Any], db_id: str) -> str:
-        """无 LLM 时的兜底规则 SQL。"""
+        """无 LLM 时的兜底规则 SQL（启发式规则，deprecated）。"""
         if not schema:
             return f"SELECT * FROM placeholder_table WHERE query = '{self._escape_sql_string(query)}' LIMIT 10"
 
@@ -642,6 +628,7 @@ class DatabaseTool:
             "en": "Please understand the question in English and generate SQL.",
         }.get(query_lang, "请使用简体中文理解问题并生成 SQL。")
 
+        import json
         schema_text = json.dumps(schema, ensure_ascii=False, indent=2)
 
         return f"""{lang_instruction}
@@ -671,6 +658,7 @@ Schema：
         db_id: str,
     ) -> str:
         """构建 SQL 自愈 Prompt。"""
+        import json
         schema_text = json.dumps(table_schemas, ensure_ascii=False, indent=2)
         return f"""你是一个 SQL 修正专家。以下 SQL 执行时报错，请根据错误信息和 Schema 修正 SQL。
 
@@ -717,55 +705,6 @@ Schema：
 
         return text.strip()
 
-    def _get_chat_model(self, tenant_id: str, llm_id: str) -> Optional[Any]:
-        """获取 Chat 模型。"""
-        try:
-            from api.db.services.llm_service import LLMBundle
-            from api.db.joint_services.tenant_model_service import (
-                get_model_config_by_type_and_name,
-                get_tenant_default_model_by_type,
-            )
-            from common.constants import LLMType
-        except Exception as e:
-            logger.warning(f"[DatabaseTool] 无法导入 LLM 相关模块: {e}")
-            return None
-
-        try:
-            if tenant_id and llm_id:
-                chat_model_config = get_model_config_by_type_and_name(
-                    tenant_id, LLMType.CHAT, llm_id
-                )
-                if chat_model_config:
-                    return LLMBundle(tenant_id, chat_model_config)
-
-            if tenant_id:
-                chat_model_config = get_tenant_default_model_by_type(
-                    tenant_id, LLMType.CHAT
-                )
-                if chat_model_config:
-                    return LLMBundle(tenant_id, chat_model_config)
-
-        except Exception as e:
-            logger.warning(f"[DatabaseTool] 获取 Chat 模型失败: {e}")
-
-        return None
-
-    def _validate_sql(self, sql: str) -> None:
-        """校验 SQL 只读性。"""
-        sql_upper = sql.strip().upper()
-
-        if not (sql_upper.startswith("SELECT") or sql_upper.startswith("WITH")):
-            raise Exception(f"仅允许 SELECT/WITH 查询，当前 SQL 以 {sql_upper.split()[0]} 开头")
-
-        dangerous_keywords = [
-            "DROP", "DELETE", "UPDATE", "INSERT", "ALTER",
-            "TRUNCATE", "CREATE", "EXEC", "EXECUTE", "MERGE",
-        ]
-        sql_words = set(re.findall(r"[A-Z_]+", sql_upper))
-        for keyword in dangerous_keywords:
-            if keyword in sql_words:
-                raise Exception(f"SQL 包含禁止关键词: {keyword}")
-
     async def _execute_with_self_healing(
         self,
         query: str,
@@ -808,74 +747,11 @@ Schema：
 
         raise Exception(f"SQL 执行失败，已重试 {max_retries} 次，最后错误: {last_error}")
 
-    async def _execute_sql(self, db_id: str, sql: str) -> list[dict]:
-        """执行 SQL 查询。"""
-        query_tool_name = f"query_{db_id}"
-        if query_tool_name not in self._db_tools:
-            raise Exception(f"数据库 {db_id} 不存在或无权访问")
-
-        result = await asyncio.to_thread(
-            self._mcp_session.tool_call,
-            name=query_tool_name,
-            arguments={"sql": sql},
-        )
-
-        if result.startswith("MCP server error") or result.startswith("Error"):
-            raise Exception(f"SQL 执行失败: {result}")
-
-        try:
-            data = json.loads(result)
-            if isinstance(data, list):
-                return data
-            elif isinstance(data, dict):
-                return [data]
-            else:
-                return []
-        except (json.JSONDecodeError, TypeError):
-            logger.warning(f"[DatabaseTool] 无法解析 SQL 结果: {result}")
-            return []
-
     def _evaluate_quality(self, rows: list[dict], sql: str) -> float:
         """评估查询质量。"""
         if not rows or not sql:
             return 0.0
         return 1.0
-
-    def _extract_tables(self, sql: str) -> list[str]:
-        """从 SQL 中提取表名。"""
-        tables = re.findall(r"FROM\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql, re.IGNORECASE)
-        joins = re.findall(r"JOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql, re.IGNORECASE)
-        return list(set(tables + joins))
-
-    def _format_result(
-        self,
-        rows: list[dict],
-        sql: str,
-        db_id: str,
-        tables: list[str],
-        query_lang: str,
-    ) -> str:
-        """格式化查询结果为 Markdown 表格 + 自然语言摘要。"""
-        if not rows:
-            return "未查询到数据。"
-
-        # Markdown 表格
-        columns = list(rows[0].keys()) if rows else []
-        header = "| " + " | ".join(columns) + " |"
-        separator = "|" + "|".join([" --- " for _ in columns]) + "|"
-        body_lines = [header, separator]
-        for row in rows[:20]:
-            body_lines.append("| " + " | ".join(str(row.get(c, "")) for c in columns) + " |")
-
-        if len(rows) > 20:
-            body_lines.append(f"| ...（省略 {len(rows) - 20} 行） |" + " |".join(["" for _ in columns]) + "|")
-
-        markdown = "\n".join(body_lines)
-
-        # 自然语言摘要
-        summary = f"查询到 {len(rows)} 条记录，数据来源：数据库 {db_id}，表 {', '.join(tables)}。"
-
-        return f"{summary}\n\n{markdown}\n\nSQL：\n```sql\n{sql}\n```"
 
     def _escape_sql_string(self, value: str) -> str:
         """转义 SQL 字符串中的单引号。"""
@@ -904,7 +780,7 @@ _database_tool_instance: Optional[DatabaseTool] = None
 
 
 def get_database_tool() -> DatabaseTool:
-    """获取 DatabaseTool 单例实例。"""
+    """获取 DatabaseTool 单例实例（legacy 路径专用）。"""
     global _database_tool_instance
     if _database_tool_instance is None:
         _database_tool_instance = DatabaseTool()

@@ -94,10 +94,10 @@ async def _call_db_tool(
     db_id: str = "",
     mcp_server_name: str = "",
 ) -> dict:
-    """调用 Database Tool。"""
-    from agent.langgraph.tools.database_tool import get_database_tool
+    """调用 Database Tool（SqlAgentRunner：模板短路 + SQL Agent 子图）。"""
+    from agent.langgraph.tools.sql_agent.runner import get_sql_agent_runner
 
-    db_tool = get_database_tool()
+    runner = get_sql_agent_runner()
     input_data = {
         "query": arguments.get("query") or arguments.get("sql") or "",
         "db_id": arguments.get("db_id") or db_id,
@@ -106,7 +106,7 @@ async def _call_db_tool(
         "mcp_server_name": arguments.get("mcp_server_name") or mcp_server_name,
         "enable_self_healing": arguments.get("enable_self_healing", True),
     }
-    return await db_tool.invoke(input_data)
+    return await runner.invoke(input_data)
 
 
 async def _call_web_tool(arguments: dict, tenant_id: str) -> dict:

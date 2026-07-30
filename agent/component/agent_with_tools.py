@@ -31,9 +31,11 @@ from api.db.services.mcp_server_service import MCPServerService
 from api.db.joint_services.tenant_model_service import get_model_config_by_type_and_name
 from common.connection_utils import timeout
 from rag.prompts.generator import next_step_async, COMPLETE_TASK, \
-    citation_prompt, kb_prompt, citation_plus, full_question, message_fit_in, structured_output_prompt
+    citation_prompt, kb_prompt, citation_plus, full_question, message_fit_in, structured_output_prompt, reflect_async
 from common.mcp_tool_call_conn import MCPToolCallSession, mcp_tool_metadata_to_openai_tool
 from agent.component.llm import LLMParam, LLM
+
+logger = logging.getLogger(__name__)
 
 
 class AgentParam(LLMParam, ToolParamBase):
@@ -76,6 +78,8 @@ class AgentParam(LLMParam, ToolParamBase):
         self.tools = []
         self.mcp = []
         self.max_rounds = 5
+        self.enable_reflection = True       # 是否启用 LLM 反思（False 时降级为纯 observation 拼接）
+        self.reflection_timeout = 10        # 反思超时（秒），超时后降级为 observation
         self.description = ""
         self.custom_header = {}
 
@@ -408,7 +412,20 @@ class Agent(LLM, ToolBase):
 
                 results = await asyncio.gather(*tool_tasks) if tool_tasks else []
                 st = timer()
-                reflection = build_observation(results)
+                if self._param.enable_reflection and results:
+                    try:
+                        reflection = await asyncio.wait_for(
+                            reflect_async(self.chat_mdl, hist, results, user_defined_prompt),
+                            timeout=self._param.reflection_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("[ReAct] 反思超时，降级为 observation")
+                        reflection = build_observation(results)
+                    except Exception as e:
+                        logger.warning(f"[ReAct] 反思失败，降级为 observation: {e}")
+                        reflection = build_observation(results)
+                else:
+                    reflection = build_observation(results)
                 append_user_content(hist, reflection)
                 self.callback("reflection", {}, str(reflection), elapsed_time=timer()-st)
 

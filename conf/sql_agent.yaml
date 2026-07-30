@@ -1,0 +1,19 @@
+# SQL Agent 配置（docs/数据库Tool渐进式披露LLM化落地设计.md §5.7）
+# 优先级：input_data.sql_agent_config > agent_config.database_config > 本文件 > 代码默认值
+
+# 探索模式：sql_agent（默认，业界标准 Agent 驱动）| legacy（启发式规则应急回滚）
+exploration_mode: sql_agent
+
+# 预算硬约束（任一耗尽，budget_guard 强制收敛 verdict=budget_exhausted）
+budget:
+  max_agent_steps: 10        # Agent 循环总步数（含工具调用步）
+  max_llm_calls: 10          # LLM 调用次数
+  max_sql_executions: 4      # SQL 执行次数（含失败重试）
+  max_describe_calls: 6      # describe_table 次数（缓存命中不计）
+  max_wall_time_sec: 90      # 墙钟超时（秒）
+  max_result_rows: 500       # 单次执行返回行数上限（同时用于 LIMIT 注入）
+
+# LLM 生成参数
+llm:
+  temperature: 0.1
+  max_tokens: 2048

@@ -61,15 +61,21 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def startup_event():
     """应用启动时初始化资源"""
     logger.info("Starting up Agentic RAG API...")
-    
-    # 初始化数据库连接
-    await init_db()
-    logger.info("Database initialized")
-    
-    # 初始化 RAGFlow 客户端
-    init_ragflow_client()
-    logger.info("RAGFlow client initialized")
-    
+
+    # 初始化数据库连接（DB 不可用时仅告警，不阻塞启动）
+    try:
+        await init_db()
+        logger.info("Database initialized")
+    except Exception as e:
+        logger.warning(f"Database init skipped: {e}")
+
+    # 初始化 RAGFlow 客户端（RAGFlow 后端不可用时仅告警）
+    try:
+        init_ragflow_client()
+        logger.info("RAGFlow client initialized")
+    except Exception as e:
+        logger.warning(f"RAGFlow client init skipped: {e}")
+
     logger.info("Agentic RAG API started successfully")
 
 # 关闭事件

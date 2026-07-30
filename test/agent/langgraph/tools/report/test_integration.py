@@ -76,8 +76,8 @@ class TestReportToolEndToEnd:
         """成功生成 Markdown 报告。"""
         result = await report_tool.invoke(
             {
-                "title": "近一个月质量分析",
-                "report_type": "quality_analysis",
+                "title": "近一个月业务分析",
+                "report_type": "business_analysis",
                 "format": "markdown",
                 "language": "zh_CN",
                 "tenant_id": "tenant_001",

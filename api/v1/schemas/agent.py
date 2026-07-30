@@ -4,31 +4,37 @@ Agent 相关 Pydantic 模型
 
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class AgentCreate(BaseModel):
+# Pydantic v2 兼容：``model_config`` 是 BaseModel 的保留属性名，
+# 因此 Python 字段统一改名为 ``model_cfg``，对外 JSON 仍用 ``model_config`` 别名。
+class _AliasModel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AgentCreate(_AliasModel):
     """创建 Agent 请求"""
     name: str = Field(..., min_length=1, max_length=100, description="Agent 名称")
     description: Optional[str] = Field(None, max_length=500, description="Agent 描述")
     tools_config: Optional[Dict[str, Any]] = Field(None, description="工具配置")
     routing_config: Optional[Dict[str, Any]] = Field(None, description="路由策略配置")
     degradation_config: Optional[Dict[str, Any]] = Field(None, description="降级策略配置")
-    model_config: Optional[Dict[str, Any]] = Field(None, description="模型配置")
+    model_cfg: Optional[Dict[str, Any]] = Field(None, alias="model_config", description="模型配置")
 
 
-class AgentUpdate(BaseModel):
+class AgentUpdate(_AliasModel):
     """更新 Agent 请求"""
     name: Optional[str] = Field(None, min_length=1, max_length=100, description="Agent 名称")
     description: Optional[str] = Field(None, max_length=500, description="Agent 描述")
     tools_config: Optional[Dict[str, Any]] = Field(None, description="工具配置")
     routing_config: Optional[Dict[str, Any]] = Field(None, description="路由策略配置")
     degradation_config: Optional[Dict[str, Any]] = Field(None, description="降级策略配置")
-    model_config: Optional[Dict[str, Any]] = Field(None, description="模型配置")
+    model_cfg: Optional[Dict[str, Any]] = Field(None, alias="model_config", description="模型配置")
     is_active: Optional[bool] = Field(None, description="是否启用")
 
 
-class AgentResponse(BaseModel):
+class AgentResponse(_AliasModel):
     """Agent 响应"""
     id: str
     user_id: str
@@ -37,25 +43,19 @@ class AgentResponse(BaseModel):
     tools_config: Optional[Dict[str, Any]] = None
     routing_config: Optional[Dict[str, Any]] = None
     degradation_config: Optional[Dict[str, Any]] = None
-    model_config: Optional[Dict[str, Any]] = None
+    model_cfg: Optional[Dict[str, Any]] = Field(None, alias="model_config")
     is_active: bool
     created_at: datetime
     updated_at: datetime
-    
-    class Config:
-        from_attributes = True
 
 
-class AgentListItem(BaseModel):
+class AgentListItem(_AliasModel):
     """Agent 列表项"""
     id: str
     name: str
     description: Optional[str] = None
     is_active: bool
     created_at: datetime
-    
-    class Config:
-        from_attributes = True
 
 
 class ToolsConfig(BaseModel):

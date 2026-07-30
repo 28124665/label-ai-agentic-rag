@@ -48,8 +48,8 @@ async def hallucination_node(state: AgentState) -> dict[str, Any]:
     - 0.3 ~ 0.6（regenerate）：准备高置信度文档用于重新生成
     - < 0.3（reject）：严重幻觉，直接拒答
 
-    regenerate 动作最多允许 MAX_REGENERATES 次，超过后降级为 reject，
-    避免图循环无限重试。
+    regenerate 动作最多允许 MAX_REGENERATES 次，超过后降级为 exhausted
+   （走 final_answer 返回保守答案），避免图循环无限重试。
 
     Args:
         state: 当前 AgentState
@@ -164,7 +164,7 @@ def _dispose(faithfulness_score: float, regenerate_count: int) -> str:
         regenerate_count: 已重新生成次数
 
     Returns:
-        str: 处置动作（pass / filter / regenerate / reject）
+        str: 处置动作（pass / filter / regenerate / exhausted / reject）
     """
     if faithfulness_score >= PASS_THRESHOLD:
         return "pass"
@@ -173,9 +173,9 @@ def _dispose(faithfulness_score: float, regenerate_count: int) -> str:
     elif faithfulness_score >= REGENERATE_THRESHOLD:
         if regenerate_count >= MAX_REGENERATES:
             logger.warning(
-                f"[hallucination] 重新生成次数已达上限 {MAX_REGENERATES}，降级为 reject"
+                f"[hallucination] 重新生成次数已达上限 {MAX_REGENERATES}，降级为 exhausted"
             )
-            return "reject"
+            return "exhausted"
         return "regenerate"
     else:
         return "reject"
@@ -188,7 +188,7 @@ def hallucination_decision(state: AgentState) -> str:
         state: 当前 AgentState
 
     Returns:
-        str: 下一个节点名称
+        str: 下一个节点名称（映射键：observability / prompt_assembly / final_answer）
     """
     action = state.get("hallucination_action", "pass")
 
@@ -198,7 +198,7 @@ def hallucination_decision(state: AgentState) -> str:
         return "observability"
     elif action == "regenerate":
         return "prompt_assembly"
-    elif action == "reject":
+    elif action in ("reject", "exhausted"):
         return "final_answer"
     else:
         return "observability"

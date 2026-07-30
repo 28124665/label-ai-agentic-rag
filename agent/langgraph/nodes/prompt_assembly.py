@@ -142,6 +142,8 @@ def _format_rag_context(rag_docs: list[dict]) -> str:
 def _format_db_context(db_result: dict) -> str:
     """格式化数据库查询结果为上下文文本。
 
+    支持聚合的多数据库结果（is_aggregated=True 时，每行标注 _source_db 来源）。
+
     Args:
         db_result: 数据库查询结果
 
@@ -151,6 +153,8 @@ def _format_db_context(db_result: dict) -> str:
     sql = db_result.get("sql", "")
     rows = db_result.get("rows", [])
     row_count = db_result.get("row_count", 0)
+    is_aggregated = db_result.get("is_aggregated", False)
+    source_dbs = db_result.get("source_dbs", [])
 
     if not rows:
         return ""
@@ -160,17 +164,27 @@ def _format_db_context(db_result: dict) -> str:
         parts.append(f"查询语句：{sql}")
     parts.append(f"结果行数：{row_count}")
 
+    # 聚合结果时标注来源数据库
+    if is_aggregated and source_dbs:
+        parts.append(f"数据来源：{', '.join(source_dbs)}")
+
     # 格式化数据行（限制最多 20 行）
     display_rows = rows[:20]
     if display_rows:
-        # 获取列名
-        columns = list(display_rows[0].keys()) if display_rows else []
+        # 获取列名（过滤掉 _source_db 内部字段）
+        columns = [k for k in display_rows[0].keys() if k != "_source_db"]
         if columns:
             parts.append("列名：" + "、".join(columns))
 
         # 格式化每行数据
         for i, row in enumerate(display_rows, 1):
-            row_str = "，".join(f"{k}={v}" for k, v in row.items())
+            # 提取来源数据库标注（如果存在）
+            source_db = row.get("_source_db", "")
+            # 格式化行数据，排除内部字段
+            row_items = [(k, v) for k, v in row.items() if k != "_source_db"]
+            row_str = "，".join(f"{k}={v}" for k, v in row_items)
+            if source_db:
+                row_str += f"（来源：{source_db}）"
             parts.append(f"  第{i}行：{row_str}")
 
         if row_count > 20:

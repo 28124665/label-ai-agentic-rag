@@ -288,6 +288,118 @@ class LangGraphRunner:
         """
         return asyncio.run(self.aget_state(thread_id))
 
+    def _get_compiled_graph_with_checkpointer(self, checkpointer):
+        """获取带 checkpointer 的编译图（用于澄清中断/恢复）。
+
+        每次创建新的编译图实例，因为 checkpointer 需要绑定到特定 thread_id。
+
+        Args:
+            checkpointer: LangGraph checkpointer 实例（如 MemorySaver）
+
+        Returns:
+            CompiledGraph: 带 checkpointer 的编译图
+        """
+        from agent.langgraph.graph import build_agent_graph
+
+        graph = build_agent_graph()
+        compiled = graph.compile(checkpointer=checkpointer)
+        return compiled
+
+    async def arun_with_checkpointer(
+        self,
+        user_question: str,
+        thread_id: str = "",
+        checkpointer=None,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """支持 checkpointer 的异步执行（用于澄清中断/恢复）。
+
+        使用 checkpointer 持久化图状态，当 clarification_node 触发 interrupt 时，
+        可以通过 aresume 方法恢复执行。
+
+        Args:
+            user_question: 用户问题
+            thread_id: 线程 ID（用于状态恢复），为空则自动生成
+            checkpointer: LangGraph checkpointer 实例，为 None 则使用 MemorySaver
+            **kwargs: 其他参数（同 arun）
+
+        Returns:
+            dict: 包含 thread_id 和 final_state 的结果
+        """
+        import uuid
+
+        if checkpointer is None:
+            from langgraph.checkpoint.memory import MemorySaver
+
+            checkpointer = MemorySaver()
+
+        thread_id = thread_id or str(uuid.uuid4())
+        config = {"configurable": {"thread_id": thread_id}}
+
+        compiled = self._get_compiled_graph_with_checkpointer(checkpointer)
+        initial_state = self._build_initial_state(user_question, **kwargs)
+
+        logger.info(
+            f"[LangGraphRunner] 开始带 checkpointer 执行: "
+            f"question='{user_question}', thread_id={thread_id}"
+        )
+
+        final_state = await compiled.ainvoke(initial_state, config=config)
+
+        logger.info(f"[LangGraphRunner] 执行完成: thread_id={thread_id}")
+
+        return {"thread_id": thread_id, "final_state": final_state}
+
+    async def aresume(self, thread_id: str, user_answer: str, checkpointer=None):
+        """恢复中断的图执行（用户提交澄清回答后调用）。
+
+        Args:
+            thread_id: 中断时的线程 ID
+            user_answer: 用户对澄清问题的回答
+            checkpointer: 与 arun_with_checkpointer 相同的 checkpointer 实例
+
+        Yields:
+            tuple: (node_name, node_output) 元组
+        """
+        from langgraph.types import Command
+
+        if checkpointer is None:
+            from langgraph.checkpoint.memory import MemorySaver
+
+            checkpointer = MemorySaver()
+
+        config = {"configurable": {"thread_id": thread_id}}
+        compiled = self._get_compiled_graph_with_checkpointer(checkpointer)
+
+        logger.info(
+            f"[LangGraphRunner] 恢复执行: thread_id={thread_id}, answer='{user_answer}'"
+        )
+
+        async for output in compiled.astream(Command(resume=user_answer), config=config):
+            for node_name, node_output in output.items():
+                logger.info(f"[LangGraphRunner] 节点完成: {node_name}")
+                yield node_name, node_output
+
+    def run_with_checkpointer(
+        self,
+        user_question: str,
+        thread_id: str = "",
+        checkpointer=None,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """同步版本的带 checkpointer 执行。
+
+        通过 asyncio.run 在内部创建事件循环。
+        """
+        return asyncio.run(
+            self.arun_with_checkpointer(
+                user_question=user_question,
+                thread_id=thread_id,
+                checkpointer=checkpointer,
+                **kwargs,
+            )
+        )
+
 
 # 全局实例
 _runner_instance: LangGraphRunner | None = None

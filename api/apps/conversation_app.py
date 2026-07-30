@@ -477,3 +477,196 @@ Related search terms:
         gen_conf,
     )
     return get_json_result(data=[re.sub(r"^[0-9]\. ", "", a) for a in ans.split("\n") if re.match(r"^[0-9]\. ", a)])
+
+
+@manager.route("/clarify", methods=["POST"])  # noqa: F821
+@login_required
+async def submit_clarification():
+    """提交用户对澄清问题的回答，恢复 LangGraph 图执行。
+
+    请求体:
+    {
+        "thread_id": "xxx",              # 图执行线程ID
+        "clarification_answer": "xxx",   # 用户回答
+        "stream": true                   # 是否流式返回
+    }
+
+    响应:
+    - stream=true: SSE 流式返回后续执行结果
+    - stream=false: JSON 返回最终结果
+    """
+    req = await request.json
+    thread_id = req.get("thread_id", "")
+    answer = req.get("clarification_answer", "")
+    stream_mode = req.get("stream", True)
+
+    if not thread_id or not answer:
+        return get_json_result(
+            data=False,
+            message="thread_id and clarification_answer are required",
+        )
+
+    from agent.langgraph.runner import get_runner
+
+    runner = get_runner()
+
+    if stream_mode:
+        async def stream():
+            try:
+                async for node_name, node_output in runner.aresume(thread_id, answer):
+                    # 检查是否再次需要澄清（多轮澄清）
+                    if node_name == "clarification":
+                        yield "data:" + json.dumps({
+                            "code": 0,
+                            "message": "",
+                            "data": {
+                                "type": "clarification",
+                                "clarification_request": node_output.get("clarification_request"),
+                                "thread_id": thread_id,
+                            }
+                        }, ensure_ascii=False) + "\n\n"
+                    elif node_name == "answer_output":
+                        final_answer = node_output.get("final_answer", "")
+                        yield "data:" + json.dumps({
+                            "code": 0,
+                            "message": "",
+                            "data": {
+                                "type": "answer",
+                                "answer": final_answer,
+                            }
+                        }, ensure_ascii=False) + "\n\n"
+                yield "data:" + json.dumps({
+                    "code": 0,
+                    "message": "",
+                    "data": True
+                }, ensure_ascii=False) + "\n\n"
+            except Exception as e:
+                logging.exception(e)
+                yield "data:" + json.dumps({
+                    "code": 500,
+                    "message": str(e),
+                    "data": {"answer": "**ERROR**: " + str(e)}
+                }, ensure_ascii=False) + "\n\n"
+
+        resp = Response(stream(), mimetype="text/event-stream")
+        resp.headers.add_header("Cache-control", "no-cache")
+        resp.headers.add_header("Connection", "keep-alive")
+        resp.headers.add_header("X-Accel-Buffering", "no")
+        resp.headers.add_header("Content-Type", "text/event-stream; charset=utf-8")
+        return resp
+    else:
+        # 非流式模式：收集所有输出后返回最终结果
+        final_answer = ""
+        try:
+            async for node_name, node_output in runner.aresume(thread_id, answer):
+                if node_name == "answer_output":
+                    final_answer = node_output.get("final_answer", "")
+            return get_json_result(data={"answer": final_answer, "thread_id": thread_id})
+        except Exception as e:
+            logging.exception(e)
+            return get_json_result(data=False, message=str(e))
+
+
+@manager.route("/langgraph_completion", methods=["POST"])  # noqa: F821
+@login_required
+async def langgraph_completion():
+    """LangGraph 工作流执行入口（支持澄清中断/恢复）。
+
+    请求体:
+    {
+        "question": "xxx",           # 用户问题
+        "stream": true,              # 是否流式返回
+        "tenant_id": "xxx",          # 租户ID
+        "llm_id": "xxx",             # LLM模型ID
+        "kb_ids": ["xxx"],           # 知识库ID列表
+        "db_id": "xxx",              # 数据库ID
+        "conversation_history": []   # 对话历史
+    }
+
+    响应:
+    - 流式返回节点执行结果
+    - 遇到澄清时返回 clarification 事件
+    """
+    req = await request.json
+    question = req.get("question", "")
+    stream_mode = req.get("stream", True)
+
+    if not question:
+        return get_json_result(data=False, message="question is required")
+
+    from agent.langgraph.runner import get_runner
+
+    runner = get_runner()
+
+    if stream_mode:
+        async def stream():
+            try:
+                result = await runner.arun_with_checkpointer(
+                    user_question=question,
+                    tenant_id=req.get("tenant_id", ""),
+                    llm_id=req.get("llm_id", ""),
+                    kb_ids=req.get("kb_ids", []),
+                    db_id=req.get("db_id", ""),
+                    conversation_history=req.get("conversation_history", []),
+                )
+
+                thread_id = result.get("thread_id", "")
+                final_state = result.get("final_state", {})
+
+                # 检查是否触发了澄清
+                clarification_request = final_state.get("clarification_request")
+                if clarification_request:
+                    yield "data:" + json.dumps({
+                        "code": 0,
+                        "message": "",
+                        "data": {
+                            "type": "clarification",
+                            "clarification_request": clarification_request,
+                            "thread_id": thread_id,
+                        }
+                    }, ensure_ascii=False) + "\n\n"
+                else:
+                    final_answer = final_state.get("final_answer", "")
+                    yield "data:" + json.dumps({
+                        "code": 0,
+                        "message": "",
+                        "data": {
+                            "type": "answer",
+                            "answer": final_answer,
+                            "thread_id": thread_id,
+                        }
+                    }, ensure_ascii=False) + "\n\n"
+
+                yield "data:" + json.dumps({
+                    "code": 0,
+                    "message": "",
+                    "data": True
+                }, ensure_ascii=False) + "\n\n"
+            except Exception as e:
+                logging.exception(e)
+                yield "data:" + json.dumps({
+                    "code": 500,
+                    "message": str(e),
+                    "data": {"answer": "**ERROR**: " + str(e)}
+                }, ensure_ascii=False) + "\n\n"
+
+        resp = Response(stream(), mimetype="text/event-stream")
+        resp.headers.add_header("Cache-control", "no-cache")
+        resp.headers.add_header("Connection", "keep-alive")
+        resp.headers.add_header("X-Accel-Buffering", "no")
+        resp.headers.add_header("Content-Type", "text/event-stream; charset=utf-8")
+        return resp
+    else:
+        try:
+            result = await runner.arun_with_checkpointer(
+                user_question=question,
+                tenant_id=req.get("tenant_id", ""),
+                llm_id=req.get("llm_id", ""),
+                kb_ids=req.get("kb_ids", []),
+                db_id=req.get("db_id", ""),
+                conversation_history=req.get("conversation_history", []),
+            )
+            return get_json_result(data=result)
+        except Exception as e:
+            logging.exception(e)
+            return get_json_result(data=False, message=str(e))
