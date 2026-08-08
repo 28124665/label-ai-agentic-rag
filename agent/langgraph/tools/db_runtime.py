@@ -353,37 +353,30 @@ class DbRuntime:
         return f"{summary}\n\n{markdown}\n\nSQL：\n```sql\n{sql}\n```"
 
     def get_chat_model(self, tenant_id: str, llm_id: str) -> Optional[Any]:
-        """获取 Chat 模型（与历史 DatabaseTool._get_chat_model 语义一致）。"""
+        """获取 Chat 模型 LLMBundle（与历史 DatabaseTool._get_chat_model 语义一致）。
+
+        PR-0.3a（§5.2 调用点 4）：保留此方法供 legacy 路径使用，
+        SQL Agent 主路径已改走 ModelGateway（见 runner._build_llm_callable）。
+        配置解析逻辑委托 LLMBundleAdapter._resolve_chat_model，保持行为一致。
+
+        Returns:
+            LLMBundle 实例；配置不可用时返回 None（与历史语义一致，不抛异常）。
+        """
         try:
-            from api.db.services.llm_service import LLMBundle
-            from api.db.joint_services.tenant_model_service import (
-                get_model_config_by_type_and_name,
-                get_tenant_default_model_by_type,
-            )
-            from common.constants import LLMType
+            from agent.langgraph.gateways.llm_bundle_adapter import LLMBundleAdapter
+            from agent.langgraph.gateways.errors import ModelConfigResolveError
         except Exception as e:
-            logger.warning(f"[DbRuntime] 无法导入 LLM 相关模块: {e}")
+            logger.warning(f"[DbRuntime] 无法导入 LLMBundleAdapter: {e}")
             return None
 
         try:
-            if tenant_id and llm_id:
-                chat_model_config = get_model_config_by_type_and_name(
-                    tenant_id, LLMType.CHAT, llm_id
-                )
-                if chat_model_config:
-                    return LLMBundle(tenant_id, chat_model_config)
-
-            if tenant_id:
-                chat_model_config = get_tenant_default_model_by_type(
-                    tenant_id, LLMType.CHAT
-                )
-                if chat_model_config:
-                    return LLMBundle(tenant_id, chat_model_config)
-
-        except Exception as e:
+            return LLMBundleAdapter._resolve_chat_model(tenant_id, llm_id)
+        except ModelConfigResolveError as e:
             logger.warning(f"[DbRuntime] 获取 Chat 模型失败: {e}")
-
-        return None
+            return None
+        except Exception as e:
+            logger.warning(f"[DbRuntime] 获取 Chat 模型异常: {e}")
+            return None
 
 
 # 全局实例（与 get_database_tool 单例模式一致，共享 MCP 会话状态）

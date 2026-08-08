@@ -261,17 +261,57 @@ class SqlAgentRunner:
 
     # ========== LLM callable 构建 ==========
     def _build_llm_callable(self, tenant_id: str, llm_id: str) -> Optional[LLMCallable]:
-        """将 LLMBundle 适配为 async (prompt) -> str 接口（与 react/graph.py 同构）。"""
-        chat_mdl = self._runtime.get_chat_model(tenant_id, llm_id)
-        if chat_mdl is None:
+        """将 ModelGateway 适配为 async (prompt) -> str 接口（与 react/graph.py 同构）。
+
+        PR-0.3a（§5.2 调用点 4）：改走 ModelGateway.async_chat，
+        返回 ChatResult.content（SQL Agent 协议不变，仍是 async (prompt) -> str）。
+        配置不可用时返回 None，触发降级到 legacy 流水线。
+        """
+        from agent.langgraph.gateways.errors import ModelConfigResolveError
+        from agent.langgraph.gateways.factory import get_gateway_resolver
+
+        # 预检：配置不可用时返回 None，触发降级（与历史 get_chat_model 返回 None 同语义）
+        # 通过尝试解析配置来预检（不实际调用 LLM）
+        try:
+            from agent.langgraph.gateways.llm_bundle_adapter import LLMBundleAdapter
+            LLMBundleAdapter._resolve_chat_model(tenant_id, llm_id)
+        except ModelConfigResolveError as e:
+            logger.warning(
+                f"[SqlAgentRunner] Chat 模型配置不可用，将降级到 legacy: {e}"
+            )
+            return None
+        except Exception as e:
+            logger.warning(
+                f"[SqlAgentRunner] Chat 模型预检异常，将降级到 legacy: {e}"
+            )
             return None
 
+        resolver = get_gateway_resolver()
+
         async def llm_callable(prompt: str) -> str:
-            return await chat_mdl.async_chat(
-                "",
-                [{"role": "user", "content": prompt}],
-                SQL_AGENT_GEN_CONF,
-            )
+            """LLMCallable 协议：async (prompt) -> str。
+
+            内部通过 ModelGateway.async_chat 调用，返回 ChatResult.content。
+            **ERROR** 语义保持（SQL Agent 子图已有 startswith("**ERROR**") 判断）。
+            """
+            try:
+                gw = await resolver.model_for(tenant_id)
+                result = await gw.async_chat(
+                    tenant_id=tenant_id,
+                    llm_id=llm_id,
+                    system="",
+                    history=[{"role": "user", "content": prompt}],
+                    gen_conf=SQL_AGENT_GEN_CONF,
+                    prefer_bundle=True,
+                )
+                return result.content
+            except ModelConfigResolveError as e:
+                # 配置解析失败 → 返回 **ERROR**（SQL Agent 子图会走降级路径）
+                logger.warning(f"[SqlAgentRunner] ModelGateway 配置解析失败: {e}")
+                return f"**ERROR**:ModelConfigResolveError: {e}"
+            except Exception as e:
+                logger.warning(f"[SqlAgentRunner] ModelGateway 调用异常: {e}")
+                return f"**ERROR**:{type(e).__name__}: LLM 调用失败"
 
         return llm_callable
 

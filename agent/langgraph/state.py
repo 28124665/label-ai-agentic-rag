@@ -51,7 +51,6 @@ class ToolResult(TypedDict, total=False):
     tool: str
     success: bool
     error: str
-    error_code: str
     rag_docs: list[dict]
     rag_quality_score: float
     rag_has_relevant: bool
@@ -63,11 +62,6 @@ class ToolResult(TypedDict, total=False):
     latency_ms: int
     db_id: str
     kb_ids: list[str]
-    skill_id: str
-    data_skill_id: str
-    retrieval_skill_id: str
-    query_template_id: str
-    evidence_ids: list[str]
 
 
 def merge_timings(left: dict | None, right: dict | None) -> dict:
@@ -92,17 +86,22 @@ class AgentState(TypedDict, total=False):
     状态字段按功能分组：
     - 用户输入：user_question、query_lang
     - 路由决策：route_target
-    - RAG Tool 输出：rag_docs、rag_quality_score、rag_has_relevant、rag_relevant_count、rag_top_score
+    - RAG Tool 输出：rag_docs、rag_quality_score、rag_has_relevant、rag_relevant_count、rag_top_score、rag_score_source
     - Database Tool 输出：db_result、db_quality_score
     - Web Tool 输出：web_docs
     - 融合上下文：merged_context
     - LLM 生成：generated_answer
     - 幻觉检测：hallucination_score、hallucination_action
-    - 重试控制：retry_count、max_retries
+    - 重试控制：retry_count、max_retries、retry_token_used、retry_token_budget
     - 可观测性：trace_id、node_timings
 
     使用 total=False 允许部分字段在状态初始化时缺失，
     各节点按需读写字段。
+
+    方案 A（RAGTool 单次执行 + 主流程统一重试）新增字段：
+    - rag_score_source：分数来源标注，供 quality_check 按来源选择阈值
+    - retry_token_used：已用 Token 预算，由 rag_tool_node 累计、quality_check 检查
+    - retry_token_budget：Token 预算上限，默认 2000，可被 agent_config 覆盖
     """
 
     # 用户输入
@@ -119,12 +118,41 @@ class AgentState(TypedDict, total=False):
     route_target: Literal["rag", "database", "hybrid", "web", "chitchat"]
     route_decision: Optional[RouteDecision]  # 三层路由架构的完整决策信息
 
+    # Skill 路由（v1.1 §11.1，版本化引用 + 三元审计链）
+    # resolved_skill_ref: ResolvedSkillRef 序列化 dict，一次请求固定不可变
+    # skill_route_trace: SkillRoutingTrace 序列化 dict，含 catalog_revision ↔ evidence_snapshot_id 审计链
+    # catalog_revision: 当前请求绑定的 Catalog 版本号，retry 期间冻结（§11.5.2 约束3）
+    resolved_skill_ref: dict
+    skill_route_trace: dict
+    catalog_revision: str
+
+    # P0 主链路接线字段（§18.1，过渡期兼容 §11.6.2 约束2）
+    # skill_set: ResolvedSkillSet 序列化 dict（旧模型，供 plan_with_skills / Policy Guard 回退）
+    #   - 写入：intent_router_node（Skill 命中且非 fallback 时）
+    #   - 读取：planner.plan_with_skills / SkillPolicyAdapter / SkillEvidenceAdapter
+    #   - 迁移完成后移除，由 resolved_skill_ref 替代
+    skill_set: dict
+    # skill_resolution: SkillResolveResult 序列化 dict（含 resolved/reason/fallback_used/warnings）
+    #   - 写入：intent_router_node（所有路径均写入，便于审计"为何未命中 Skill"）
+    #   - 读取：observability 节点上报路由追踪
+    skill_resolution: dict
+    # skill_evidence_requirements: SkillEvidenceRequirement 序列化 list
+    #   - 写入：intent_router_node（Skill 命中时由 SkillEvidenceAdapter.collect_requirements 生成）
+    #   - 读取：evidence_fusion_node（按 source_quota 截断）/ answerability 检查
+    skill_evidence_requirements: list[dict]
+
     # RAG Tool 输出
     rag_docs: list[dict]  # [{content, score, source, chunk_id}]
     rag_quality_score: float  # 0.0 ~ 1.0
     rag_has_relevant: bool
     rag_relevant_count: int
     rag_top_score: float
+    # 分数来源标注（方案 A 新增）：
+    #   - 取值 "base"（基础评估，Rerank 分数）或 "grader_merged"（Grader 增强后融合分数）
+    #   - 默认 "base"（字段缺失时 quality_check 使用 base 阈值 0.7）
+    #   - 写入：rag_tool_node（透传自 RAGTool._evaluate_quality 的 score_source）
+    #   - 读取：quality_check（按来源选择阈值 base=0.7 / grader_merged=0.65）
+    rag_score_source: str
 
     # Database Tool 输出
     db_result: dict  # {sql, rows, row_count, source}
@@ -156,6 +184,16 @@ class AgentState(TypedDict, total=False):
     # 重试控制
     retry_count: int
     max_retries: int
+    # 已用 Token 预算（方案 A 新增）：
+    #   - 默认 0（首次检索前无消耗）
+    #   - 写入：rag_tool_node（每次检索后累加估算 Token，公式 docs 总字符数 / 4）
+    #   - 读取：quality_check（达到 budget 上限时降级 fallback_web，不再重试）
+    retry_token_used: int
+    # Token 预算上限（方案 A 新增）：
+    #   - 默认 2000（DEFAULT_RETRY_TOKEN_BUDGET，可被 agent_config.retry.max_retry_tokens 覆盖）
+    #   - 写入：图初始化时由配置注入（rag_tool_node 不写，quality_check 不写）
+    #   - 读取：quality_check（与 retry_token_used 比较，判断是否耗尽预算）
+    retry_token_budget: int
 
     # 可观测性
     trace_id: str
@@ -192,87 +230,49 @@ class AgentState(TypedDict, total=False):
     clarification_request: Optional[dict]
     clarification_context: Optional[str]      # 用户对澄清的回答
 
-    # ========== 受限 ReAct 子图（仅复杂任务） ==========
-    # react_state 内部结构:
-    #   step_count: int             — 已执行步数
-    #   tool_call_count: int        — 工具调用次数
-    #   db_query_count: int         — DB 查询次数
-    #   llm_call_count: int         — LLM 调用次数
-    #   action_history: list[dict]  — 每一步 action
-    #   observations: list[dict]    — 每一步 observation
-    #   finish_reason: str          — finish / budget_exhausted / policy_denied / error
-    react_state: Optional[dict]
-
-    # react_execution_result 结构:
-    #   success: bool               — 子图是否成功完成
-    #   evidence: list[dict]        — 标准化后的 Evidence 列表
-    #   step_count: int             — 总步数
-    #   finish_reason: str          — 终止原因
-    #   summary: str                — 子图执行摘要
-    react_execution_result: Optional[dict]
-
-    # ========== Evidence 与答案充分性 ==========
-    # evidence: list[dict]          — 标准化后的证据集合（来自所有工具）
-    # 每个 evidence 含 source_type / title / content / source_uri / confidence 等字段
+    # ========== Claim 级可追溯幻觉检测（v2.1 §4.0 + §4.1 + §4.2） ==========
+    # Evidence 融合后的统一证据列表（替代 rag_docs/db_result/web_docs 分散读取）
+    # 每项为 Evidence TypedDict（见 evidence/models.py）
     evidence: list[dict]
 
-    # evidence_fusion_result 结构:
-    #   fused_count: int            — 融合后证据数
-    #   conflicts: list[dict]       — 检测到的冲突
-    #   token_budget: int           — 分配给 Prompt 的 token 预算
-    evidence_fusion_result: Optional[dict]
+    # 不可变 Evidence 快照 ID（Prompt/verifier/references 使用同一 ID，硬约束 #4）
+    evidence_snapshot_id: str
 
-    # answerability_result 结构:
-    #   answerable: bool            — 证据是否充分
-    #   coverage_score: float       — 覆盖率 0.0 ~ 1.0
-    #   missing_aspects: list[str]  — 缺失的方面
-    #   recommended_action: str     — generate / react_continue / ask_clarification / partial_answer
-    answerability_result: Optional[dict]
+    # Evidence 快照元数据（含 tool_run_id/attempt_id/created_at/source_type_counts）
+    evidence_snapshot: Optional[dict]
 
-    # ========== 能力开关（每会话可控） ==========
-    # react_enabled: 来自 agent_config.react.enabled（默认 False）
-    #   - True: 复杂任务有可能进入 react_subgraph（由 Planner 决定）
-    #   - False: 永远不进入 react_subgraph
-    react_enabled: bool
+    # 工具运行 ID（用于重试时证据重建，每次工具执行递增）
+    tool_run_id: str
 
-    # db_tool_enabled: 来自 agent_config.db_tool.enabled（默认 True，向后兼容）
-    #   - True: 复杂任务有可能使用 db_tool（由路由决定）
-    #   - False: 路由时跳过 db_tool，hybrid 降级为单 RAG，database 降级为 rag_tool
-    db_tool_enabled: bool
+    # 重试轮次（首次=1，quality_check 重试递增）
+    attempt_id: int
 
-    # ========== 报告生成（Report Tool） ==========
-    # report_artifacts: list[dict]   — ReportArtifact 列表（通常 1 个）
-    # report_summary: str            — 报告摘要，用于最终答案展示
-    # report_quality_score: float    — 报告质量分
-    # report_error: str              — 报告生成错误信息
-    # report_error_code: str         — 错误码（REPORT_*）
-    # report_file_uri: str           — 产物 URI
-    # report_download_url: str       — 下载链接
-    # report_partial: bool           — 是否部分成功
-    report_artifacts: list[dict]
-    report_summary: str
-    report_quality_score: float
-    report_error: str
-    report_error_code: str
-    report_file_uri: str
-    report_download_url: str
-    report_partial: bool
+    # 运行模式（chitchat/factual/report，与 EnforcementMode 正交）
+    run_mode: str
 
-    # ========== 报告可信治理与人机协同（按 docs §4-6） ==========
-    # report_claims: list[dict]        — 报告 Claim 列表（含 evidence_refs / support_status）
-    # report_data_sources: list[dict]  — 报告数据来源列表（DataSourceRef）
-    # report_human_review: dict        — 人工审核结果（HumanReviewResult）
-    # report_publish_status: str       — 发布状态（draft / pending_review / approved / published / rejected）
-    # report_needs_human_review: bool  — 标记是否需要人工审核（前端据此显示 UI）
-    report_claims: list[dict]
-    report_data_sources: list[dict]
-    report_human_review: dict
-    report_publish_status: str
-    report_needs_human_review: bool
+    # 强制级别（disabled/shadow/enforced，v2.1 §4.0.1 P0-3 修复）
+    enforcement_mode: str
 
-    # ========== Skill 运行时 ==========
-    skill_set: dict | None
-    skill_resolution: dict | None
-    skill_plan: dict | None
-    skill_validation_result: dict | None
-    skill_evidence_requirements: list[dict]
+    # 结构化答案 AST（见 evidence/answer_ast.py，含 section/paragraph/claim/table 节点）
+    answer_ast: Optional[dict]
+
+    # Claim 列表（见 evidence/claim.py，含 raw_declared_indices/verified_support_ids 等）
+    claims: list[dict]
+
+    # Claim 裁决列表（含 claim_id/final_status/verified_support_ids/contradicting_ids）
+    claim_verdicts: list[dict]
+
+    # Policy Engine 决策结果（pass/filter/regenerate/reject）
+    policy_action: str
+
+    # 引用目录（含 index/evidence_id/source_type/source_uri/accessible）
+    citation_catalog: list[dict]
+
+    # 引用指标（含 citation_validity/citation_correctness/citation_completeness/faithfulness）
+    citation_metrics: Optional[dict]
+
+    # 验证器状态（ok/timeout/error/mixed/unknown，v2.1 P0-5 修复）
+    verifier_status: str
+
+    # 拒答原因（ENFORCED 模式下 reject 时填充）
+    reject_reason: str

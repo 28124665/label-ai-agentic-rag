@@ -27,7 +27,7 @@
 import asyncio
 import logging
 import re
-from typing import Any, Optional
+from typing import Optional
 
 import jinja2
 import json_repair
@@ -180,7 +180,8 @@ async def call_reflection_llm(
 ) -> str:
     """调用 LLM 执行反思。
 
-    通过 TenantLLMService 获取 LLM 实例（参考 llm_router.py 的 _call_llm 方法）。
+    通过 ModelGateway（§5.2 调用点 6）获取 LLM 调用结果。
+    ModelGateway 替代直接使用 LLMBundle，为后续 model-client 化预留升级路径。
 
     Args:
         tenant_id: 租户 ID
@@ -196,41 +197,32 @@ async def call_reflection_llm(
         asyncio.TimeoutError: 超时
         Exception: LLM 调用失败
     """
-    from api.db.services.tenant_llm_service import TenantLLMService
-    from common.constants import LLMType
+    from agent.langgraph.gateways.factory import get_gateway_resolver
 
     # 1. 构建反思 Prompt
     system_prompt = build_reflection_prompt(question, tool_results)
     messages = [{"role": "user", "content": "请输出反思结果的 JSON。"}]
     gen_conf = {"temperature": 0.2, "max_tokens": 500}
 
-    # 2. 通过 TenantLLMService.get_model_config 获取模型配置
-    model_config = TenantLLMService.get_model_config(
-        tenant_id=tenant_id,
-        llm_type=LLMType.CHAT.value,
-        llm_name=llm_id,
-    )
+    # 2. 通过 ModelGateway 获取 LLM 调用结果（§5.2 调用点 6）
+    resolver = get_gateway_resolver()
+    gateway = await resolver.model_for(tenant_id)
 
-    # 3. 通过 TenantLLMService.model_instance 获取 LLM 实例
-    llm_instance = TenantLLMService.model_instance(model_config)
-    if not llm_instance:
-        raise ValueError(f"无法创建 LLM 实例: {llm_id}")
-
-    # 4. 调用 async_chat，使用 asyncio.wait_for 控制超时
+    # 3. 调用 async_chat，使用 asyncio.wait_for 控制超时
     async def _do_chat() -> str:
-        ans = await llm_instance.async_chat(
+        result = await gateway.async_chat(
+            tenant_id=tenant_id,
+            llm_id=llm_id,
             system=system_prompt,
             history=messages,
             gen_conf=gen_conf,
+            prefer_bundle=False,
         )
-        # async_chat 可能返回 (content, token_count) 元组或字符串
-        if isinstance(ans, tuple):
-            ans = ans[0]
-        return ans
+        return result.content
 
     ans = await asyncio.wait_for(_do_chat(), timeout=timeout_s)
 
-    # 5. 检查 **ERROR** 前缀
+    # 4. 检查 **ERROR** 前缀（§5.2 错误语义对齐：**ERROR** 判断逻辑禁止改动）
     if ans.startswith("**ERROR**"):
         raise RuntimeError(f"LLM 调用失败: {ans}")
 

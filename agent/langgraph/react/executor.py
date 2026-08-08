@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Optional
+from typing import Optional
 
 from agent.langgraph.evidence.models import Evidence, normalize_tool_result
 from agent.langgraph.react.models import ReactAction, ReactObservation
@@ -83,6 +83,12 @@ async def _call_rag_tool(
         "kb_ids": arguments.get("kb_ids") or kb_ids,
         "tenant_id": tenant_id,
         "llm_id": llm_id,
+        # ★ §5.9 补齐：此前遗漏的参数（arguments 显式指定 > 内置默认值）
+        "similarity_threshold": float(arguments.get("similarity_threshold", 0.2)),
+        "keywords_similarity_weight": float(
+            arguments.get("keywords_similarity_weight", 0.5)
+        ),
+        "rerank_id": arguments.get("rerank_id", ""),
     }
     return await rag_tool.invoke(input_data)
 

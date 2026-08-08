@@ -109,15 +109,25 @@ class ToolDispatcher:
         # 步骤参数优先，state 兜底
         query = step.args.query or state.get("user_question", "")
 
+        # §5.9 参数优先级：step.args.extra > agent_config.rag_config > 内置默认值
+        agent_config = state.get("agent_config", {}) or {}
+        rag_config = agent_config.get("rag_config", {}) or {}
+
         input_data = {
             "query": query,
             "query_lang": state.get("query_lang", "zh_CN"),
             "kb_ids": step.args.kb_ids or state.get("kb_ids", []),
             "tenant_id": state.get("tenant_id", ""),
             "llm_id": state.get("llm_id", ""),
+            # ★ §5.9 补齐：从 rag_config 读取此前遗漏的参数（extra 可覆盖）
+            "similarity_threshold": rag_config.get("similarity_threshold", 0.2),
+            "keywords_similarity_weight": rag_config.get(
+                "keywords_similarity_weight", 0.5
+            ),
+            "rerank_id": rag_config.get("rerank_id", ""),
         }
 
-        # 合并 extra 参数
+        # 合并 extra 参数（优先级最高，覆盖 rag_config 默认值）
         if step.args.extra:
             input_data.update(step.args.extra)
 
@@ -130,6 +140,9 @@ class ToolDispatcher:
             "rag_relevant_count": result.get("relevant_count", 0),
             "rag_top_score": result.get("top_score", 0.0),
             "kb_ids": step.args.kb_ids or state.get("kb_ids", []),
+            # §5.8 透传降级状态（供 quality_check 前置规则识别 infra 失败）
+            "retrieval_error_code": result.get("retrieval_error_code", ""),
+            "retrieval_mode_used": result.get("retrieval_mode_used", ""),
         }
 
     async def _execute_skill_rag(
@@ -161,6 +174,9 @@ class ToolDispatcher:
             "rag_relevant_count": result.get("relevant_count", 0),
             "rag_top_score": result.get("top_score", 0.0),
             "kb_ids": kb_ids,
+            # §5.8 透传降级状态（供 quality_check 前置规则识别 infra 失败）
+            "retrieval_error_code": result.get("retrieval_error_code", ""),
+            "retrieval_mode_used": result.get("retrieval_mode_used", ""),
         }
 
     async def _execute_database(self, step: PlanStep, state: "AgentState") -> dict:

@@ -17,25 +17,31 @@
 
 构建 Agent 工作流的状态图，包括节点注册、边连接和条件路由。
 
-状态图流程：
+状态图流程（v2.1 §3.2 Claim 级可追溯幻觉检测改造后）：
   question_input → intent_router → [条件路由]
     ├── clarification → intent_router (用户回答后重新路由)
-    ├── react_subgraph (ReAct 启用 + 复杂任务) → evidence_fusion → answerability_check
     ├── rag_tool → [条件路由]
-    │     ├── db_tool (hybrid 串行) → reflection
-    │     └── reflection (非 hybrid)
-    ├── db_tool → reflection
-    ├── plan_executor → reflection
-    ├── web_tool → reflection
+    │     ├── db_tool (hybrid 串行) → evidence_fusion
+    │     └── evidence_fusion (非 hybrid)
+    ├── db_tool → evidence_fusion
+    ├── plan_executor → evidence_fusion
     └── prompt_assembly (chitchat)
-  reflection → quality_check → [条件路由]
+  web_tool → evidence_fusion
+  evidence_fusion → reflection → quality_check → [条件路由]
     ├── prompt_assembly (pass)
-    ├── rag_tool / db_tool (retry)
-    └── web_tool (fallback_web)
+    ├── rag_tool / db_tool (retry) → evidence_fusion
+    └── web_tool (fallback_web) → evidence_fusion
   prompt_assembly → llm_generate → hallucination → [条件路由]
-    ├── observability → answer_output → END (pass/filter)
+    ├── answer_renderer → observability → answer_output → END (pass/filter)
     ├── prompt_assembly (regenerate)
-    └── answer_output → END (reject/exhausted)
+    └── observability → answer_output → END (reject/exhausted)
+
+v2.1 P0-1 拓扑修复要点：
+  - 所有工具产出（rag_tool/db_tool/plan_executor/web_tool）必须经过 evidence_fusion
+    构建 EvidenceSnapshot，保证 prompt_assembly/verifier/references 复用同一不可变快照
+  - 不再有无条件 quality_check → prompt_assembly 边，避免与条件边并行执行
+  - hallucination 的 pass/filter 路径先经 answer_renderer 渲染（fail-closed，
+    仅输出 supported Claim），再到 observability，杜绝未验证 Claim 泄露
 """
 
 import logging
@@ -55,18 +61,14 @@ from agent.langgraph.nodes.web_tool_node import web_tool_node
 from agent.langgraph.nodes.plan_executor import plan_executor_node
 from agent.langgraph.nodes.reflection import reflection_node
 from agent.langgraph.nodes.clarification import clarification_node
+from agent.langgraph.nodes.evidence_fusion import evidence_fusion_node
 from agent.langgraph.nodes.quality_check import quality_check_node, quality_check_decision
 from agent.langgraph.nodes.prompt_assembly import prompt_assembly_node
 from agent.langgraph.nodes.llm_generate import llm_generate_node
 from agent.langgraph.nodes.hallucination import hallucination_node, hallucination_decision
+from agent.langgraph.nodes.answer_renderer import answer_renderer_node
 from agent.langgraph.nodes.observability import observability_node
 from agent.langgraph.nodes.final_answer import final_answer_node
-from agent.langgraph.nodes.react_subgraph import react_subgraph_node
-from agent.langgraph.nodes.evidence_fusion import evidence_fusion_node
-from agent.langgraph.nodes.answerability_check import (
-    answerability_check_node,
-    answerability_routing,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -98,14 +100,17 @@ def build_agent_graph() -> StateGraph:
     graph.add_node("db_tool", db_tool_node)
     graph.add_node("web_tool", web_tool_node)
     graph.add_node("plan_executor", plan_executor_node)
-    graph.add_node("react_subgraph", react_subgraph_node)
+    # ★ v2.1 §3.2 新增：Evidence 融合节点（工具→fusion→reflection→quality_check）
+    # 不可变 EvidenceSnapshot 在此构建，确保 prompt_assembly/verifier/references 复用同一快照
     graph.add_node("evidence_fusion", evidence_fusion_node)
-    graph.add_node("answerability_check", answerability_check_node)
     graph.add_node("reflection", reflection_node)
     graph.add_node("quality_check", quality_check_node)
     graph.add_node("prompt_assembly", prompt_assembly_node)
     graph.add_node("llm_generate", llm_generate_node)
     graph.add_node("hallucination", hallucination_node)
+    # ★ v2.1 §3.2 新增：结构化答案渲染节点（fail-closed，仅输出 supported Claim）
+    # 位于 hallucination 之后、observability 之前，过滤未验证 Claim
+    graph.add_node("answer_renderer", answer_renderer_node)
     graph.add_node("observability", observability_node)
     graph.add_node("answer_output", final_answer_node)
 
@@ -117,7 +122,7 @@ def build_agent_graph() -> StateGraph:
     # question_input → intent_router
     graph.add_edge("question_input", "intent_router")
 
-    # intent_router → 条件路由（clarification / rag_tool / db_tool / plan_executor / react_subgraph / prompt_assembly）
+    # intent_router → 条件路由（clarification / rag_tool / db_tool / plan_executor / prompt_assembly）
     graph.add_conditional_edges(
         "intent_router",
         route_decision,
@@ -126,7 +131,6 @@ def build_agent_graph() -> StateGraph:
             "rag_tool": "rag_tool",
             "db_tool": "db_tool",
             "plan_executor": "plan_executor",
-            "react_subgraph": "react_subgraph",
             "prompt_assembly": "prompt_assembly",
         },
     )
@@ -134,35 +138,35 @@ def build_agent_graph() -> StateGraph:
     # clarification → intent_router（用户回答后重新路由）
     graph.add_edge("clarification", "intent_router")
 
-    # ReAct 子图 → evidence_fusion → answerability_check → quality_check
-    graph.add_edge("react_subgraph", "evidence_fusion")
-    graph.add_conditional_edges(
-        "answerability_check",
-        answerability_routing,
-        {
-            "quality_check": "quality_check",
-        },
-    )
-    graph.add_edge("evidence_fusion", "answerability_check")
-
-    # rag_tool → hybrid 串行 db_tool，否则 reflection
+    # rag_tool → hybrid 串行 db_tool，否则 evidence_fusion
+    # ★ v2.1 P0-1 修复：非 hybrid 路径直接进 evidence_fusion（不再跳过融合直连 reflection）
+    # 拓扑约束：所有工具产出必须经过 evidence_fusion 构建 snapshot，
+    #           保证 prompt_assembly/verifier/references 复用同一不可变快照
     graph.add_conditional_edges(
         "rag_tool",
         after_rag_tool,
         {
             "db_tool": "db_tool",
-            "reflection": "reflection",
+            "evidence_fusion": "evidence_fusion",
         },
     )
 
-    # db_tool → reflection（含 hybrid 串行完成后的汇合）
-    graph.add_edge("db_tool", "reflection")
+    # db_tool → evidence_fusion（含 hybrid 串行完成后的汇合）
+    # ★ v2.1 P0-1 修复：原 db_tool → reflection 改为 db_tool → evidence_fusion，
+    #                   确保数据库结果也进入 snapshot
+    graph.add_edge("db_tool", "evidence_fusion")
 
-    # plan_executor → reflection（并行执行完所有步骤后进入反思）
-    graph.add_edge("plan_executor", "reflection")
+    # plan_executor → evidence_fusion（并行执行完所有步骤后进入融合）
+    # ★ v2.1 P0-1 修复：原 plan_executor → reflection 改为 → evidence_fusion
+    graph.add_edge("plan_executor", "evidence_fusion")
 
-    # web_tool → reflection
-    graph.add_edge("web_tool", "reflection")
+    # web_tool → evidence_fusion
+    # ★ v2.1 P0-1 修复：原 web_tool → reflection 改为 → evidence_fusion
+    graph.add_edge("web_tool", "evidence_fusion")
+
+    # evidence_fusion → reflection（融合后进入反思）
+    # ★ v2.1 §3.2 新增边：snapshot 构建完成后才进入 reflection 评估检索质量
+    graph.add_edge("evidence_fusion", "reflection")
 
     # reflection → quality_check
     graph.add_edge("reflection", "quality_check")
@@ -185,16 +189,24 @@ def build_agent_graph() -> StateGraph:
     # llm_generate → hallucination
     graph.add_edge("llm_generate", "hallucination")
 
-    # hallucination → 条件路由（observability / prompt_assembly / answer_output）
+    # hallucination → 条件路由（answer_renderer / observability / prompt_assembly）
+    # ★ v2.1 §3.2 + P0-3 修复：路由映射与 hallucination_decision 返回值对齐
+    # - pass/filter → answer_renderer：结构化渲染，仅输出 supported Claim（fail-closed）
+    # - reject/exhausted → observability：跳过渲染，直接输出拒答/保守答案
+    # - regenerate → prompt_assembly：回到提示词组装重新生成
     graph.add_conditional_edges(
         "hallucination",
         hallucination_decision,
         {
+            "answer_renderer": "answer_renderer",
             "observability": "observability",
             "prompt_assembly": "prompt_assembly",
-            "final_answer": "answer_output",
         },
     )
+
+    # answer_renderer → observability（渲染完成后再记录可观测性指标）
+    # ★ v2.1 §3.2 新增边：渲染后的 final_answer 进入 observability 统一埋点
+    graph.add_edge("answer_renderer", "observability")
 
     # observability → answer_output
     graph.add_edge("observability", "answer_output")

@@ -8,6 +8,50 @@ pre_filter:
   external_search_check: true
   greeting_check: true
   entity_format_check: true
+  directive_check: true  # 精确指令匹配（@database/@rag/@web）
+
+# 第0.5层：复杂度闸门配置
+# 在规则路由前做正则结构特征检测，复杂问题跳过规则路由直接进入 LLM 路由
+complexity_gate:
+  enabled: true
+  signals:
+    # 信号1：长查询（字符数 >= threshold）
+    long_query:
+      enabled: true
+      threshold: 50
+    # 信号2：多子句（2+ 个分隔符 ，,；;）
+    multi_clause:
+      enabled: true
+      min_count: 2
+    # 信号3：多问号（2+ 个 ？?）
+    multi_question:
+      enabled: true
+      min_count: 2
+    # 信号4：推理标记词
+    reasoning_markers:
+      enabled: true
+      keywords:
+        - 分析
+        - 对比
+        - 比较
+        - 为什么
+        - 推导
+        - 评估
+        - 综合考虑
+        - 权衡
+        - 论证
+    # 信号5：多工具关键词（同时命中 DB + RAG 偏向词）
+    multi_tool:
+      enabled: true
+    # 信号6：递进结构（先...再.../首先...然后...）
+    progressive:
+      enabled: true
+      patterns:
+        - "先.{1,20}再"
+        - "首先.{1,20}然后"
+        - "第一步"
+        - "接着"
+        - "最后"
 
 # 第1层：规则路由配置
 rule_router:
