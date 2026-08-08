@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from agent.langgraph.routers.complexity_gate import ComplexityGate, get_complexity_gate
 from agent.langgraph.routers.config_loader import load_config
 from agent.langgraph.routers.llm_router import LLMRouter
 from agent.langgraph.routers.models import RouteDecision
@@ -23,7 +24,7 @@ from agent.langgraph.state import AgentState
 
 
 class TestPreFilter:
-    """测试第0层前置过滤器。"""
+    """测试第0层前置过滤器（含精确指令匹配）。"""
 
     def setup_method(self):
         """初始化测试环境。"""
@@ -37,7 +38,7 @@ class TestPreFilter:
             "1' OR '1'='1",
             "admin'--",
         ]
-        
+
         for query in malicious_queries:
             decision = self.pre_filter.filter(query)
             assert decision is not None, f"Should detect SQL injection: {query}"
@@ -53,7 +54,7 @@ class TestPreFilter:
             "获取管理员密码",
             "DROP DATABASE production",
         ]
-        
+
         for query in queries:
             decision = self.pre_filter.filter(query)
             assert decision is not None, f"Should detect privilege escalation: {query}"
@@ -68,7 +69,7 @@ class TestPreFilter:
             "谷歌搜索 Python 教程",
             "在网上查找",
         ]
-        
+
         for query in queries:
             decision = self.pre_filter.filter(query)
             assert decision is not None, f"Should detect external search: {query}"
@@ -85,7 +86,7 @@ class TestPreFilter:
             "hi",
             "嗨",
         ]
-        
+
         for greeting in greetings:
             decision = self.pre_filter.filter(greeting)
             assert decision is not None, f"Should detect greeting: {greeting}"
@@ -101,7 +102,7 @@ class TestPreFilter:
             "工单号：123456",
             "订单号：789012",
         ]
-        
+
         for query in queries:
             decision = self.pre_filter.filter(query)
             assert decision is not None, f"Should match entity format: {query}"
@@ -116,49 +117,140 @@ class TestPreFilter:
             "数据治理是什么",
             "统计本月销售额",
         ]
-        
+
         for query in normal_queries:
             decision = self.pre_filter.filter(query)
             assert decision is None, f"Should not match pre-filter: {query}"
 
+    def test_directive_database(self):
+        """测试 @database 精确指令匹配。"""
+        queries = [
+            "@database 查询本月销售额",
+            "@db 统计用户总数",
+        ]
+        for query in queries:
+            decision = self.pre_filter.filter(query)
+            assert decision is not None, f"Should match directive: {query}"
+            assert decision.target == "database"
+            assert decision.confidence == 0.98
+            assert decision.source == "prefilter"
+            assert decision.metadata.get("directive") is True
+
+    def test_directive_rag(self):
+        """测试 @rag 精确指令匹配。"""
+        queries = [
+            "@rag 数据治理是什么",
+            "@kb 解释 RAG 原理",
+        ]
+        for query in queries:
+            decision = self.pre_filter.filter(query)
+            assert decision is not None, f"Should match directive: {query}"
+            assert decision.target == "rag"
+            assert decision.confidence == 0.98
+            assert decision.metadata.get("directive") is True
+
+    def test_directive_web(self):
+        """测试 @web 精确指令匹配。"""
+        queries = [
+            "@web 搜索最新新闻",
+            "@search Python 教程",
+        ]
+        for query in queries:
+            decision = self.pre_filter.filter(query)
+            assert decision is not None, f"Should match directive: {query}"
+            assert decision.target == "web"
+            assert decision.confidence == 0.98
+            assert decision.metadata.get("directive") is True
+
+    def test_directive_respects_complex_query(self):
+        """测试精确指令在复杂查询下仍然生效（优先于复杂度闸门）。"""
+        # 即使包含推理标记词（分析/对比），精确指令仍然命中
+        query = "@database 对比分析 A 产线和 B 产线的 OEE"
+        decision = self.pre_filter.filter(query)
+        assert decision is not None
+        assert decision.target == "database"
+        assert decision.confidence == 0.98
+        assert decision.metadata.get("directive") is True
+
 
 class TestRuleRouter:
-    """测试第1层规则路由器。"""
+    """测试第1层规则路由器（Tier1 强模式 + Tier2 弱关键词封顶）。"""
 
     def setup_method(self):
         """初始化测试环境。"""
         self.config = load_config()
         self.rule_router = RuleRouter(self.config)
 
-    def test_database_intent_with_aggregation(self):
-        """测试包含聚合词的数据库意图。"""
+    def test_tier1_strong_pattern_rag_definition(self):
+        """测试 Tier1 强模式：定义型问题路由到 rag，置信度 0.80。"""
+        queries = [
+            "什么是数据治理",
+            "数据治理是什么",
+            "RAG 是什么意思",
+        ]
+        for query in queries:
+            decision = self.rule_router.route(query)
+            assert decision.target == "rag", f"Should route to rag: {query}"
+            assert decision.confidence == 0.80, f"Strong pattern confidence=0.80: {query}"
+            assert decision.source == "rule"
+            assert "强模式" in decision.reason
+
+    def test_tier1_strong_pattern_database_stats(self):
+        """测试 Tier1 强模式：统计型问题路由到 database，置信度 0.80。"""
+        queries = [
+            "统计用户总数",
+            "查询订单数量",
+            "统计员工人数",
+        ]
+        for query in queries:
+            decision = self.rule_router.route(query)
+            assert decision.target == "database", f"Should route to database: {query}"
+            assert decision.confidence == 0.80, f"Strong pattern confidence=0.80: {query}"
+            assert decision.source == "rule"
+            assert "强模式" in decision.reason
+
+    def test_tier2_weak_keywords_db_capped(self):
+        """测试 Tier2 弱关键词：DB 偏向词置信度封顶 0.55，强制走 LLM。"""
         queries = [
             "Q3 华东区总产量",
             "统计本月销售额",
             "计算平均订单金额",
             "汇总各部门业绩",
         ]
-        
         for query in queries:
             decision = self.rule_router.route(query)
             assert decision.target == "database", f"Should route to database: {query}"
-            assert decision.confidence >= 0.7, f"Confidence should be >= 0.7: {query}"
+            assert decision.confidence <= 0.55, (
+                f"Weak keyword confidence capped at 0.55: {query}, "
+                f"got {decision.confidence}"
+            )
             assert decision.source == "rule"
 
-    def test_rag_intent_with_concept(self):
-        """测试包含概念词的 RAG 意图。"""
+    def test_tier2_weak_keywords_rag_capped(self):
+        """测试 Tier2 弱关键词：RAG 偏向词置信度封顶 0.55，强制走 LLM。"""
         queries = [
-            "数据治理是什么",
             "如何配置系统",
             "解释一下 RAG 原理",
             "为什么需要检索增强",
         ]
-        
         for query in queries:
             decision = self.rule_router.route(query)
             assert decision.target == "rag", f"Should route to rag: {query}"
-            assert decision.confidence >= 0.7, f"Confidence should be >= 0.7: {query}"
+            assert decision.confidence <= 0.55, (
+                f"Weak keyword confidence capped at 0.55: {query}, "
+                f"got {decision.confidence}"
+            )
             assert decision.source == "rule"
+
+    def test_tier2_never_reaches_rule_to_llm_threshold(self):
+        """测试 Tier2 弱关键词永远不会达到 0.7 阈值（不会短路）。"""
+        # 即使匹配多个关键词，置信度也不会超过 0.55
+        query = "统计汇总计算平均总产量数据"
+        decision = self.rule_router.route(query)
+        assert decision.confidence <= 0.55, (
+            f"Capped confidence must be < 0.7 to force LLM routing, "
+            f"got {decision.confidence}"
+        )
 
     def test_external_scope_detection(self):
         """测试外部范围词检测。"""
@@ -167,7 +259,7 @@ class TestRuleRouter:
             "百度一下 Python 教程",
             "谷歌搜索",
         ]
-        
+
         for query in queries:
             decision = self.rule_router.route(query)
             assert decision.target == "web", f"Should route to web: {query}"
@@ -180,25 +272,26 @@ class TestRuleRouter:
             "最新新闻",
             "实时数据",
         ]
-        
+
         for query in queries:
             decision = self.rule_router.route(query)
             assert decision.target == "web", f"Should route to web: {query}"
             assert decision.confidence >= 0.75, f"Confidence should be >= 0.75: {query}"
             assert decision.metadata.get("freshness_required") is True
 
-    def test_hybrid_intent(self):
-        """测试混合意图。"""
+    def test_hybrid_intent_weak_keywords(self):
+        """测试混合意图（Tier2 弱关键词，封顶 0.55）。"""
         queries = [
-            "对比 A 产线和 B 产线的 OEE，并分析差异原因",
             "查询销售数据并解释趋势",
         ]
-        
+
         for query in queries:
             decision = self.rule_router.route(query)
-            # 混合意图可能路由到 hybrid 或根据主要意图路由
-            assert decision.target in ["hybrid", "database", "rag"], f"Should route to hybrid or main intent: {query}"
+            assert decision.target in ["hybrid", "database", "rag"], (
+                f"Should route to hybrid or main intent: {query}"
+            )
             assert decision.source == "rule"
+            assert decision.confidence <= 0.55
 
     def test_low_confidence_triggers_llm(self):
         """测试低置信度触发 LLM 路由。"""
@@ -207,6 +300,99 @@ class TestRuleRouter:
         decision = self.rule_router.route(query)
         # 置信度应该 < 0.7，触发 LLM 路由
         assert decision.confidence < 0.7, f"Low confidence should trigger LLM: {query}"
+
+
+class TestComplexityGate:
+    """测试第0.5层复杂度闸门。"""
+
+    def setup_method(self):
+        """初始化测试环境。"""
+        self.config = load_config()
+        self.gate = ComplexityGate(self.config)
+
+    def test_simple_query_not_complex(self):
+        """测试简单查询不被判定为复杂。"""
+        simple_queries = [
+            "你好",
+            "数据治理是什么",
+            "统计本月销售额",
+            "今天天气怎么样",
+        ]
+        for query in simple_queries:
+            result = self.gate.check(query)
+            assert not result.is_complex, f"Simple query should not be complex: {query}"
+            assert result.confidence == 0.0
+            assert result.triggered_signals == []
+
+    def test_long_query_signal(self):
+        """测试长查询信号触发。"""
+        # 构造 >= 50 字符的查询
+        query = "请帮我分析一下当前系统中各个产线在第三季度的整体OEE表现情况，并给出改善建议" * 2
+        result = self.gate.check(query)
+        assert result.is_complex
+        assert "long_query" in result.triggered_signals
+
+    def test_multi_clause_signal(self):
+        """测试多子句信号触发。"""
+        query = "查询销售额，对比上月数据，分析差异原因；给出改进建议"
+        result = self.gate.check(query)
+        assert result.is_complex
+        assert "multi_clause" in result.triggered_signals
+
+    def test_multi_question_signal(self):
+        """测试多问号信号触发。"""
+        query = "什么是OEE？如何计算？为什么需要关注？"
+        result = self.gate.check(query)
+        assert result.is_complex
+        assert "multi_question" in result.triggered_signals
+
+    def test_reasoning_markers_signal(self):
+        """测试推理标记词信号触发。"""
+        queries = [
+            "分析当前产线的 OEE 表现",
+            "对比 A 产线和 B 产线的产能",
+            "为什么系统响应变慢了",
+        ]
+        for query in queries:
+            result = self.gate.check(query)
+            assert result.is_complex, f"Reasoning query should be complex: {query}"
+            assert "reasoning_markers" in result.triggered_signals
+
+    def test_multi_tool_signal(self):
+        """测试多工具关键词信号触发（同时命中 DB + RAG）。"""
+        # 同时包含 DB 偏向词和 RAG 偏向词
+        query = "查询统计数据并解释原因"
+        result = self.gate.check(query)
+        assert result.is_complex, f"Multi-tool query should be complex: {query}"
+        assert "multi_tool" in result.triggered_signals
+
+    def test_progressive_signal(self):
+        """测试递进结构信号触发。"""
+        queries = [
+            "先查询数据，再分析原因",
+            "首先统计销售额，然后对比上月",
+            "第一步查询库存，接着计算周转率",
+        ]
+        for query in queries:
+            result = self.gate.check(query)
+            assert result.is_complex, f"Progressive query should be complex: {query}"
+            assert "progressive" in result.triggered_signals
+
+    def test_multiple_signals_increase_confidence(self):
+        """测试多信号触发时置信度更高。"""
+        # 同时触发多个信号
+        query = "先查询销售数据，再对比上月数据，分析差异原因，为什么下降了？"
+        result = self.gate.check(query)
+        assert result.is_complex
+        assert len(result.triggered_signals) >= 2
+        assert result.confidence >= 0.6  # 2+ signals -> 0.6+
+
+    def test_empty_query_not_complex(self):
+        """测试空查询不被判定为复杂。"""
+        result = self.gate.check("")
+        assert not result.is_complex
+        result = self.gate.check("   ")
+        assert not result.is_complex
 
 
 class TestLLMRouter:
@@ -799,6 +985,13 @@ class TestObservability:
         planner = type(
             "PlannerStub", (), {"plan_with_skills": AsyncMock(return_value=planned)}
         )()
+        # 复杂度闸门 stub：返回非复杂，确保流程进入规则路由（routed confidence=0.9 >= 0.7 短路）
+        from agent.langgraph.routers.complexity_gate import ComplexityResult
+        complexity_gate = type(
+            "ComplexityGateStub",
+            (),
+            {"check": lambda self, q: ComplexityResult(is_complex=False)},
+        )()
 
         with (
             patch(
@@ -808,6 +1001,10 @@ class TestObservability:
             patch(
                 "agent.langgraph.nodes.intent_router.get_planner",
                 return_value=planner,
+            ),
+            patch(
+                "agent.langgraph.nodes.intent_router.get_complexity_gate",
+                return_value=complexity_gate,
             ),
         ):
             result = await intent_router_node(
@@ -827,28 +1024,30 @@ class TestObservability:
 
     @pytest.mark.asyncio
     async def test_route_decision_logging(self):
-        """测试路由决策日志完整性。"""
+        """测试路由决策日志完整性（使用 Tier1 强模式查询，短路在规则路由）。"""
         from agent.langgraph.nodes.intent_router import intent_router_node
-        
+
+        # "统计用户总数" 匹配 Tier1 强模式 ^统计.+(?:数量|总数|人数)$
+        # confidence=0.80, source=rule, 不会触发复杂度闸门也不会进入 LLM 路由
         state: AgentState = {
-            "user_question": "Q3 华东区总产量",
+            "user_question": "统计用户总数",
             "query_lang": "zh_CN",
             "tenant_id": "test_tenant",
             "llm_id": "test_llm",
             "kb_ids": ["test_kb"],
         }
-        
+
         # 执行路由节点
         result = await intent_router_node(state)
-        
+
         # 检查路由决策信息
         assert "route_target" in result
         assert "route_decision" in result
         assert "node_timings" in result
-        
+
         decision = result["route_decision"]
         assert decision.target == "database"
-        assert decision.confidence >= 0.7
+        assert decision.confidence == 0.80
         assert decision.source == "rule"
         assert decision.reason != ""
         assert decision.complexity == "simple"
