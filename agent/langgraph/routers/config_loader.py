@@ -30,6 +30,11 @@ class IntentRouterConfig:
         return self._config.get("pre_filter", {})
 
     @property
+    def complexity_gate(self) -> dict[str, Any]:
+        """获取复杂度闸门配置。"""
+        return self._config.get("complexity_gate", {})
+
+    @property
     def rule_router(self) -> dict[str, Any]:
         """获取规则路由配置。"""
         return self._config.get("rule_router", {})
@@ -131,6 +136,30 @@ class ConfigLoader:
                 "external_search_check": True,
                 "greeting_check": True,
                 "entity_format_check": True,
+                "directive_check": True,
+            },
+            "complexity_gate": {
+                "enabled": True,
+                "signals": {
+                    "long_query": {"enabled": True, "threshold": 50},
+                    "multi_clause": {"enabled": True, "min_count": 2},
+                    "multi_question": {"enabled": True, "min_count": 2},
+                    "reasoning_markers": {
+                        "enabled": True,
+                        "keywords": [
+                            "分析", "对比", "比较", "为什么", "推导",
+                            "评估", "综合考虑", "权衡", "论证",
+                        ],
+                    },
+                    "multi_tool": {"enabled": True},
+                    "progressive": {
+                        "enabled": True,
+                        "patterns": [
+                            "先.{1,20}再", "首先.{1,20}然后",
+                            "第一步", "接着", "最后",
+                        ],
+                    },
+                },
             },
             "rule_router": {
                 "enabled": True,

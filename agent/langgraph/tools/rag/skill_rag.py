@@ -82,6 +82,13 @@ class SkillRAGExecutor:
             metadata_filters=self._render_value(
                 target.get("metadata_filters", {}), context
             ),
+            # ★ §5.9 补齐：从 skill target 声明读取此前遗漏的参数
+            # skill target 声明 > 内置默认值
+            similarity_threshold=float(target.get("similarity_threshold", 0.2)),
+            keywords_similarity_weight=float(
+                target.get("keywords_similarity_weight", 0.5)
+            ),
+            rerank_id=str(target.get("rerank_id", "")),
         )
         return PreparedSkillRAGRequest(str(target["target_id"]), rag_input)
 
@@ -271,4 +278,6 @@ class SkillRAGExecutor:
             query_simplified="",
             detected_lang="zh_CN",
             retrieval_time_ms=0,
+            retrieval_error_code="",
+            retrieval_mode_used="",
         )

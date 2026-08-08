@@ -1,15 +1,17 @@
 """第0层：前置过滤器。
 
-在进入规则路由前执行前置过滤，按优先级依次检测：
+在进入复杂度闸门和规则路由前执行前置过滤，按优先级依次检测：
 1. 安全拦截：SQL 注入特征、越权关键词
-2. 显式外部搜索指令：同时命中动作词和外部范围词
-3. 问候语识别：匹配问候模式
-4. 实体格式匹配：匹配预定义实体格式
+2. 精确指令匹配：@database / @rag / @web / /help（用户显式指定工具）
+3. 显式外部搜索指令：同时命中动作词和外部范围词
+4. 问候语识别：匹配问候模式
+5. 实体格式匹配：匹配预定义实体格式
 
 设计原则：
 - 零成本、零延迟（< 1ms）
-- 高置信度（1.0）
+- 高置信度（0.95-1.0）
 - 命中即返回，不进入后续路由层
+- 精确指令在复杂度闸门之前，尊重用户显式意图
 """
 
 import logging
@@ -85,6 +87,15 @@ class PreFilter:
         r"^bye[！!。.？?]?$",
     ]
 
+    # 精确指令匹配（@database / @rag / @web / /help）
+    # 用户显式指定工具，直接路由，不经过复杂度闸门和规则路由
+    DIRECTIVE_PATTERNS = [
+        (re.compile(r"^@(?:database|db)\s+", re.IGNORECASE), "database"),
+        (re.compile(r"^@(?:rag|kb)\s+", re.IGNORECASE), "rag"),
+        (re.compile(r"^@(?:web|search)\s+", re.IGNORECASE), "web"),
+        (re.compile(r"^/(?:help|status)\b", re.IGNORECASE), "chitchat"),
+    ]
+
     # 实体格式匹配（SKU-\d+、ORD-\d+、工单号：\d+ 等）
     ENTITY_PATTERNS = [
         (r"SKU-\d+", "database"),
@@ -118,17 +129,22 @@ class PreFilter:
         if security_decision:
             return security_decision
 
-        # 2. 显式外部搜索指令
+        # 2. 精确指令匹配（@database / @rag / @web / /help）
+        directive_decision = self._check_directive(query_stripped)
+        if directive_decision:
+            return directive_decision
+
+        # 3. 显式外部搜索指令
         external_search_decision = self._check_external_search(query_stripped)
         if external_search_decision:
             return external_search_decision
 
-        # 3. 问候语识别
+        # 4. 问候语识别
         greeting_decision = self._check_greeting(query_stripped)
         if greeting_decision:
             return greeting_decision
 
-        # 4. 实体格式匹配
+        # 5. 实体格式匹配
         entity_decision = self._check_entity_format(query_stripped)
         if entity_decision:
             return entity_decision
@@ -173,6 +189,37 @@ class PreFilter:
                     reason=f"安全拦截：检测到越权关键词 '{keyword}'",
                     complexity="simple",
                     metadata={"blocked": True, "reason": "privilege_escalation"},
+                )
+
+        return None
+
+    def _check_directive(self, query: str) -> Optional[RouteDecision]:
+        """检查精确指令匹配。
+
+        用户通过 @database / @rag / @web / /help 显式指定工具时，
+        直接路由到对应目标，不经过复杂度闸门和规则路由。
+
+        精确指令在复杂度闸门之前执行，即使用户的问题包含复杂度信号
+        （如"分析"、"对比"），也尊重用户的显式意图。
+
+        Args:
+            query: 用户查询
+
+        Returns:
+            RouteDecision: 如果命中精确指令，返回路由决策；否则返回 None
+        """
+        for pattern, target in self.DIRECTIVE_PATTERNS:
+            if pattern.search(query):
+                logger.info(
+                    f"[PreFilter] 命中精确指令: '{query[:30]}' -> {target}"
+                )
+                return RouteDecision(
+                    target=target,
+                    confidence=0.98,
+                    source="prefilter",
+                    reason=f"精确指令匹配: {pattern.pattern}",
+                    complexity="simple",
+                    metadata={"directive": True, "directive_pattern": pattern.pattern},
                 )
 
         return None

@@ -1,0 +1,83 @@
+# RAG 增强能力配置
+# 对应设计文档：docs/rag_enhancement_integration_design.md
+#
+# 用于控制 LangGraph 主流程中 5 项增强能力（幻觉检测 / 检索质量评估 / 熔断机制 /
+# 查询重写 / 重试控制）的开关和阈值，支持灰度发布。
+#
+# 支持环境变量覆盖：前缀 RAG_ENHANCEMENT__，双下划线分隔层级
+# （如 RAG_ENHANCEMENT__GATEWAY__VERIFIER_MODE=remote）。
+# 布尔值用 true/false，数值自动识别为 int/float，列表用 JSON 数组语法。
+
+# ========== Gateway 模式 ==========
+# 验证器网关模式：
+#   local  —— 单体阶段，import 调用 RAGFlow 组件（零网络开销）
+#   remote —— 微服务阶段，HTTP 调用验证微服务
+#   shadow —— 灰度阶段，Local + Http 双跑对比
+gateway:
+  verifier_mode: local              # local / remote / shadow
+  remote_base_url: http://localhost:9380  # remote/shadow 模式下的验证微服务地址
+  remote_timeout: 30                # 远程调用超时（秒）
+  shadow_compare_only: true         # shadow 模式下仅对比不阻断主流程
+
+# ========== 幻觉检测 ==========
+# 三层验证（规则 + NLI + LLM）+ 四级处置（pass/filter/regenerate/reject）
+hallucination:
+  enabled: true                # 是否启用增强（false 时走字符重叠度简化实现）
+  pass_threshold: 0.85         # 通过阈值：score >= 0.85 → pass
+  filter_threshold: 0.6        # 过滤阈值：0.6 <= score < 0.85 → filter
+  regenerate_threshold: 0.3    # 重写阈值：0.3 <= score < 0.6 → regenerate
+  max_regenerates: 2           # 最大重新生成次数，超限降级为 exhausted
+  rule_weight: 0.4             # 规则层权重
+  nli_weight: 0.4              # NLI 层权重
+  llm_weight: 0.2              # LLM 层权重
+
+# ========== 检索质量评估 ==========
+# Grader 三模式（LLM / Cross-Encoder / NLI），仅在边界值触发以控制成本。
+# 输出 score_source 标注（base / grader_merged），供主流程 quality_check 按来源选阈值。
+grader:
+  enabled: true                  # 是否启用 Grader 增强
+  evaluator_model: cross_encoder # 评估模型：llm / cross_encoder / local_nli
+  trigger_range: [0.4, 0.7]      # 仅基础分数落在该区间时触发 Grader 语义评估
+  fallback_on_failure: true      # Grader 失败时回退到基础评估
+  score_merge_ratio: 0.4         # 融合比例：base * ratio + grader * (1 - ratio)
+  thresholds:
+    base: 0.7              # base 分数阈值（Rerank 分数，分布偏高）
+    grader_merged: 0.65    # grader_merged 分数阈值（融合分数，分布偏低）
+
+# ========== 熔断机制 ==========
+# CircuitBreaker 状态机：closed → open → half_open → closed
+# 按服务分级配置，对主流程透明。
+circuit_breaker:
+  retrieval:
+    failure_threshold: 3       # 连续失败次数达到阈值后触发熔断
+    recovery_timeout: 30       # 熔断持续时间（秒），过后进入半开
+    half_open_max_calls: 2     # 半开状态最多探测调用次数
+    call_timeout: 10           # 单次调用超时（秒）
+
+# ========== 查询重写 ==========
+# 三策略：同义词扩展 + 子查询拆解（RRF 合并）+ HyDE（假设文档嵌入）
+# 策略轮转协同：strategies[(retry_count + attempt) % len(strategies)]
+query_rewrite:
+  enabled: true                       # 是否启用查询重写
+  sub_query_decompose:
+    enabled: true                     # 是否启用子查询拆解
+    rrf_k: 60                         # RRF 平滑常数：score = Σ 1/(k + rank + 1)
+  hyde:
+    enabled: true                     # 是否启用 HyDE
+    max_hypothetical_length: 200      # 假设文档最大长度（token）
+    temperature: 0.3                  # HyDE 生成温度
+
+# ========== 重试控制（方案 A：主流程统一管控） ==========
+# RAGTool 单次执行，重试决策和 Token 预算由主流程 quality_check 节点统一管控，
+# 消除双重重试与 Token 预算割裂。
+retry:
+  max_retries: 3           # 外层最大重试次数
+  max_retry_tokens: 2000   # Token 预算上限
+  min_relevant_docs: 2     # 最小相关文档数（quality_check 决策依据）
+
+# ========== 灰度发布 ==========
+# 控制增强能力的灰度范围，配合 Gateway shadow 模式渐进式放量。
+rollout:
+  strategy: percentage         # percentage（按百分比）/ tenant_whitelist（按租户白名单）
+  percentage: 100              # 流量百分比（0~100），percentage 策略下生效
+  tenant_whitelist: []         # 租户白名单列表，tenant_whitelist 策略下生效

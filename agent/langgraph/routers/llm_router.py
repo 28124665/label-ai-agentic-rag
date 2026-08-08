@@ -13,7 +13,6 @@
 """
 
 import asyncio
-import json
 import logging
 import time
 from typing import Any, Optional
@@ -174,8 +173,8 @@ class LLMRouter:
     async def _call_llm(self, query: str) -> dict[str, Any]:
         """调用 LLM 进行意图分类。
 
-        通过 TenantLLMService 工厂获取 LLM 实例，使用项目的统一 LLM 调用链路，
-        自动享受熔断器、重试、metrics 记录等基础设施能力。
+        通过 ModelGateway（§5.2）获取 LLM 调用结果，使用项目的统一 LLM 调用链路。
+        ModelGateway 替代直接使用 LLMBundle，为后续 model-client 化预留升级路径。
 
         Args:
             query: 用户查询
@@ -183,9 +182,8 @@ class LLMRouter:
         Returns:
             dict: LLM 返回的结构化结果
         """
+        from agent.langgraph.gateways.factory import get_gateway_resolver
         from agent.langgraph.routers.prompt_manager import get_prompt_manager
-        from api.db.services.tenant_llm_service import TenantLLMService
-        from common.constants import LLMType
         import json_repair
 
         # 加载 Prompt 模板
@@ -202,35 +200,32 @@ class LLMRouter:
             query=query,
         )
 
-        # 通过项目 LLM 工厂获取模型实例
-        model_config = TenantLLMService.get_model_config(
-            tenant_id=tenant_id,
-            llm_type=LLMType.CHAT.value,
-            llm_name=model_name,
-        )
-        llm_instance = TenantLLMService.model_instance(model_config)
+        # 通过 ModelGateway 获取 LLM 调用结果（§5.2 调用点 1）
+        # ModelGateway.async_chat 返回 ChatResult，替代 (content, token_count) 元组
+        resolver = get_gateway_resolver()
+        gateway = await resolver.model_for(tenant_id)
 
-        if not llm_instance:
-            raise ValueError(f"无法创建 LLM 实例: {model_name}")
-
-        # 使用 async_chat（非流式），返回 (content, token_count) 元组
         system_prompt = "你是一个意图识别专家。请严格按照 JSON 格式输出。"
         messages = [{"role": "user", "content": prompt}]
         gen_conf = {"temperature": 0.1, "max_tokens": 500}
 
-        content, _token_count = await llm_instance.async_chat(
+        result = await gateway.async_chat(
+            tenant_id=tenant_id,
+            llm_id=model_name,
             system=system_prompt,
             history=messages,
             gen_conf=gen_conf,
+            prefer_bundle=False,
         )
 
-        # 检查是否返回错误（async_chat 失败时返回以 **ERROR** 开头的字符串）
+        # 检查是否返回错误（§5.2 错误语义对齐：**ERROR** 判断逻辑禁止改动）
+        content = result.content
         if content.startswith("**ERROR**"):
             raise RuntimeError(f"LLM 调用失败: {content}")
 
         # 解析 JSON 响应（json_repair 能容忍格式不严格的 JSON）
-        result = json_repair.loads(content)
-        return result
+        parsed = json_repair.loads(content)
+        return parsed
 
     def _parse_llm_result(
         self, llm_result: dict[str, Any], query: str
