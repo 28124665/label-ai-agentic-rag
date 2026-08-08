@@ -1,18 +1,20 @@
 """第1层：规则路由器。
 
 基于关键词匹配和规则打分进行意图路由，支持：
-- 范围词优先判断（scope=external/internal）
-- 扩充的 DB/RAG 偏向词库
-- 置信度打分机制
-- 时效性检测
+- Tier 1 强模式匹配（正则，confidence=0.80，直接返回）
+  - 范围词 + 时效性 → web
+  - 定义型/原理型/统计型正则模式 → rag/database
+- Tier 2 弱关键词匹配（关键词计数，confidence cap=0.55，强制走 LLM）
+  - DB 偏向词、RAG 偏向词
 
 设计原则：
 - 低成本、低延迟（< 10ms）
-- 覆盖 60%-70% 的请求
-- 输出置信度供后续层决策
+- 强模式高置信度直接拦截，弱关键词不短路
+- 复杂度闸门已拦截复杂问题，此处只处理简单问题
 """
 
 import logging
+import re
 from typing import Any, Optional
 
 from agent.langgraph.routers.config_loader import IntentRouterConfig, load_config
@@ -23,6 +25,24 @@ logger = logging.getLogger(__name__)
 
 class RuleRouter:
     """第1层规则路由器。"""
+
+    # Tier 1 强模式正则（高置信度直接拦截，confidence=0.80）
+    # 定义型/原理型/统计型问题，语义强信号
+    STRONG_PATTERNS = [
+        (re.compile(r"^什么是.+"), "rag", "什么是X"),
+        (re.compile(r"^.+是什么$"), "rag", "X是什么"),
+        (re.compile(r"^.+是什么意思$"), "rag", "X是什么意思"),
+        (re.compile(r"^什么意思"), "rag", "什么意思"),
+        (re.compile(r"^.+的原理"), "rag", "X的原理"),
+        (re.compile(r"^统计.+(?:数量|总数|人数)$"), "database", "统计X数量"),
+        (re.compile(r"^查询.+(?:数量|总数|人数)$"), "database", "查询X数量"),
+    ]
+
+    # Tier 2 弱关键词置信度参数（封顶 0.55，强制走 LLM）
+    WEAK_BASE_SCORE = 0.45
+    WEAK_BONUS_PER_KEYWORD = 0.05
+    WEAK_BONUS_CAP = 0.10
+    WEAK_CONFIDENCE_CAP = 0.55
 
     def __init__(self, config: Optional[IntentRouterConfig] = None):
         """初始化规则路由器。
@@ -101,36 +121,40 @@ class RuleRouter:
                 metadata={"freshness_required": True},
             )
 
-        # 6. DB 偏向词匹配
-        db_score, db_keywords_matched = self._match_db_bias(query_lower, keywords)
+        # 6. Tier 1：强模式正则匹配（高置信度，直接返回）
+        strong_match = self._match_strong_pattern(query)
+        if strong_match:
+            target, pattern_name = strong_match
+            logger.info(
+                f"[RuleRouter] Tier1 强模式匹配: '{query}' -> {target} "
+                f"({pattern_name})"
+            )
+            return RouteDecision(
+                target=target,
+                confidence=0.80,
+                source="rule",
+                reason=f"强模式: {pattern_name}",
+                complexity="simple",
+                metadata={"pattern": pattern_name},
+            )
 
-        # 7. RAG 偏向词匹配
+        # 7. Tier 2：弱关键词匹配（低置信度，封顶 0.55，强制走 LLM）
+        db_score, db_keywords_matched = self._match_db_bias(query_lower, keywords)
         rag_score, rag_keywords_matched = self._match_rag_bias(query_lower, keywords)
 
-        # 7.5 检查是否有明确的 RAG 模式（优先级更高）
-        has_strong_rag_pattern = self._has_strong_rag_pattern(query_lower)
-
-        # 8. 综合打分，选择最高置信度的路由
-        # 如果有明确的 RAG 模式（如 "是什么"、"什么是"、"如何"），优先路由到 RAG
-        if has_strong_rag_pattern and rag_score > 0:
-            target = "rag"
-            # 强 RAG 模式给予高置信度（至少 0.75）
-            confidence = max(rag_score, 0.75)
-            confidence = min(confidence, 0.95)
-            reason = f"RAG 模式优先: {', '.join(rag_keywords_matched)}"
+        # 8. 综合打分（弱关键词，封顶 0.55，不满足 0.7 阈值，强制走 LLM）
+        if db_score > 0 and rag_score > 0:
+            target = "hybrid"
+            confidence = min(max(db_score, rag_score), self.WEAK_CONFIDENCE_CAP)
+            reason = f"混合意图: DB({', '.join(db_keywords_matched)}) + RAG({', '.join(rag_keywords_matched)})"
         elif db_score > rag_score and db_score > 0:
             target = "database"
-            confidence = min(db_score, 0.9)
-            reason = f"DB 偏向词匹配: {', '.join(db_keywords_matched)}"
+            confidence = min(db_score, self.WEAK_CONFIDENCE_CAP)
+            reason = f"DB 偏向词: {', '.join(db_keywords_matched)}"
         elif rag_score > db_score and rag_score > 0:
             target = "rag"
-            confidence = min(rag_score, 0.9)
-            reason = f"RAG 偏向词匹配: {', '.join(rag_keywords_matched)}"
-        elif db_score > 0 and rag_score > 0:
-            # 同时匹配 DB 和 RAG 词，判断为 hybrid
-            target = "hybrid"
-            confidence = min(max(db_score, rag_score), 0.85)
-            reason = f"混合意图: DB({', '.join(db_keywords_matched)}) + RAG({', '.join(rag_keywords_matched)})"
+            confidence = min(rag_score, self.WEAK_CONFIDENCE_CAP)
+            reason = f"RAG 偏向词: {', '.join(rag_keywords_matched)}"
         else:
             # 无明确匹配，默认 chitchat
             target = "chitchat"
@@ -193,8 +217,25 @@ class RuleRouter:
 
         return has_freshness and not has_historical
 
+    def _match_strong_pattern(self, query: str) -> Optional[tuple[str, str]]:
+        """Tier 1 强模式正则匹配。
+
+        检测定义型/原理型/统计型等语义强信号模式，
+        命中时给予高置信度（0.80），直接返回。
+
+        Args:
+            query: 用户查询（原始大小写）
+
+        Returns:
+            tuple: (路由目标, 模式名称) 或 None
+        """
+        for pattern, target, name in self.STRONG_PATTERNS:
+            if pattern.search(query):
+                return target, name
+        return None
+
     def _match_db_bias(self, query: str, keywords: dict) -> tuple[float, list[str]]:
-        """匹配 DB 偏向词。
+        """匹配 DB 偏向词（Tier 2 弱关键词，置信度封顶 0.55）。
 
         Args:
             query: 用户查询（小写）
@@ -209,17 +250,15 @@ class RuleRouter:
         if not matched:
             return 0.0, []
 
-        # 置信度计算：匹配词越多，置信度越高
-        # 1 个词: 0.6, 2 个词: 0.75, 3 个词: 0.9, 4+ 个词: 0.9
-        # 单个关键词匹配时置信度较低，需要 LLM 确认
-        base_score = 0.6
-        bonus = min((len(matched) - 1) * 0.15, 0.3)
-        score = base_score + bonus
+        # Tier 2 弱关键词置信度：base=0.45, bonus=0.05/词, cap=0.55
+        # 最高 0.55，永远 < 0.7 阈值，强制走 LLM 确认
+        bonus = min((len(matched) - 1) * self.WEAK_BONUS_PER_KEYWORD, self.WEAK_BONUS_CAP)
+        score = self.WEAK_BASE_SCORE + bonus
 
         return score, matched
 
     def _match_rag_bias(self, query: str, keywords: dict) -> tuple[float, list[str]]:
-        """匹配 RAG 偏向词。
+        """匹配 RAG 偏向词（Tier 2 弱关键词，置信度封顶 0.55）。
 
         Args:
             query: 用户查询（小写）
@@ -234,40 +273,12 @@ class RuleRouter:
         if not matched:
             return 0.0, []
 
-        # 置信度计算：匹配词越多，置信度越高
-        # 1 个词: 0.6, 2 个词: 0.75, 3 个词: 0.9, 4+ 个词: 0.9
-        # 单个关键词匹配时置信度较低，需要 LLM 确认
-        base_score = 0.6
-        bonus = min((len(matched) - 1) * 0.15, 0.3)
-        score = base_score + bonus
+        # Tier 2 弱关键词置信度：base=0.45, bonus=0.05/词, cap=0.55
+        # 最高 0.55，永远 < 0.7 阈值，强制走 LLM 确认
+        bonus = min((len(matched) - 1) * self.WEAK_BONUS_PER_KEYWORD, self.WEAK_BONUS_CAP)
+        score = self.WEAK_BASE_SCORE + bonus
 
         return score, matched
-
-    def _has_strong_rag_pattern(self, query: str) -> bool:
-        """检查是否有明确的 RAG 模式（优先级更高）。
-
-        检测明确的定义性问题模式，如"是什么"、"什么是"、"如何"、"为什么"等，
-        这些模式应该优先路由到 RAG，即使同时匹配了 DB 关键词。
-
-        Args:
-            query: 用户查询（小写）
-
-        Returns:
-            bool: 是否有明确的 RAG 模式
-        """
-        # 明确的定义性问题模式
-        strong_patterns = [
-            "是什么",
-            "什么是",
-            "如何",
-            "为什么",
-            "啥意思",
-            "什么意思",
-            "定义",
-            "概念",
-            "原理",
-        ]
-        return any(pattern in query for pattern in strong_patterns)
 
     def _default_decision(self, reason: str) -> RouteDecision:
         """生成默认路由决策。

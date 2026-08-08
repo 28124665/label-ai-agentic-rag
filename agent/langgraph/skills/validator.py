@@ -1,6 +1,7 @@
 """Validation rules for loaded skill configurations."""
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable
 
 from agent.langgraph.skills.models import DataSkill, ReportSkill, RetrievalSkill, SkillBase
@@ -14,11 +15,16 @@ class SkillValidationError(ValueError):
 
 
 def validate_skills(skills: Iterable[SkillBase]) -> None:
-    """Validate cross-skill references and internal configuration references."""
+    """Validate cross-skill references and internal configuration references.
+
+    P1 优化（§15.2）：重复检测从 O(N^2) 的 ``list.count()`` 改为 O(N) 的 ``Counter``。
+    """
     skill_list = list(skills)
     issues: list[str] = []
-    ids = [skill.skill_id for skill in skill_list]
-    duplicate_ids = sorted({skill_id for skill_id in ids if ids.count(skill_id) > 1})
+
+    # O(N) 重复 skill_id 检测（替代原 O(N^2) 的 ids.count(skill_id)）
+    id_counter = Counter(skill.skill_id for skill in skill_list)
+    duplicate_ids = sorted({sid for sid, count in id_counter.items() if count > 1})
     if duplicate_ids:
         issues.append(f"duplicate skill_id values: {', '.join(duplicate_ids)}")
 
@@ -26,9 +32,11 @@ def validate_skills(skills: Iterable[SkillBase]) -> None:
     data_skills = [skill for skill in skill_list if isinstance(skill, DataSkill)]
     retrieval_skills = [skill for skill in skill_list if isinstance(skill, RetrievalSkill)]
     report_ids = {skill.skill_id for skill in reports}
-    report_types = [skill.report_type for skill in reports]
+
+    # O(N) 重复 report_type 检测（替代原 O(N^2) 的 report_types.count(report_type)）
+    report_type_counter = Counter(skill.report_type for skill in reports)
     duplicate_report_types = sorted(
-        {report_type for report_type in report_types if report_types.count(report_type) > 1}
+        {rt for rt, count in report_type_counter.items() if count > 1}
     )
     if duplicate_report_types:
         issues.append(f"duplicate report_type values: {', '.join(duplicate_report_types)}")
