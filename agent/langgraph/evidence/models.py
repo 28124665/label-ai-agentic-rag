@@ -93,9 +93,35 @@ DEFAULT_AUTHORITY_SCORE = {
 
 
 def _make_evidence_id(source_uri: str, content: str) -> str:
-    """生成 Evidence 唯一 ID。"""
+    """生成 Evidence 唯一 ID（v2.1 修复：使用 SHA-256 替代 MD5，P1-E 稳定 ID）。
+
+    SHA-256 确保跨进程/跨重启稳定，同内容必同 ID。
+    """
     raw = f"{source_uri}|{content[:200]}"
-    return "ev_" + hashlib.md5(raw.encode("utf-8")).hexdigest()[:16]
+    return "ev_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _make_sql_fingerprint(sql: str) -> str:
+    """生成 SQL 指纹（规范化后哈希，P1-E 稳定 ID）。
+
+    将 SQL 转大写、去除空白、去除具体值后哈希，
+    确保同一查询模板生成相同指纹。
+
+    Args:
+        sql: 原始 SQL
+
+    Returns:
+        str: 16 位哈希指纹
+    """
+    import re
+
+    if not sql:
+        return "unknown"
+    # 规范化：转大写 + 压缩空白 + 去除字符串字面值
+    normalized = re.sub(r"\s+", " ", sql.upper().strip())
+    normalized = re.sub(r"'[^']*'", "?", normalized)  # 字符串字面值 → ?
+    normalized = re.sub(r"\b\d+\b", "?", normalized)    # 数字字面值 → ?
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
 def _truncate_content(content: str, max_chars: int = 2000) -> tuple[str, bool]:
@@ -202,7 +228,13 @@ def normalize_db_evidence(
     tenant_id: str = "",
     query: str = "",
 ) -> list[Evidence]:
-    """将 DB 查询结果标准化为 Evidence 列表。
+    """将 DB 查询结果标准化为 Evidence 列表（v2.1 修复：行级粒度 + 零行 + 聚合 SQL）。
+
+    v2.1 修订（P1-E + 验收项 21/22）：
+    - 行级粒度：每行数据生成独立 Evidence（而非整 SQL 一条），支持 claim 级引用
+    - 零行结果：DB 返回 0 行时生成 zero_rows Evidence，避免误判为"无证据"（验收项 21）
+    - 聚合 SQL：COUNT/SUM/AVG 等聚合结果作为整体 Evidence，不按行拆分（验收项 22）
+    - 稳定 source_uri：query_id + sql_fingerprint + row_key，跨进程稳定（P1-E）
 
     Args:
         db_result: DB 工具返回的 {sql, rows, row_count, source, ...}
@@ -210,10 +242,12 @@ def normalize_db_evidence(
         query: 原始查询（自然语言）
 
     Returns:
-        list[Evidence]: 单条 Evidence（一条 SQL 生成一条 Evidence）
+        list[Evidence]: 行级 Evidence 列表（零行时返回 1 条 zero_rows Evidence）
     """
     if not db_result:
         return []
+
+    import json
 
     sql = db_result.get("sql", "") or ""
     rows = db_result.get("rows", []) or []
@@ -222,73 +256,201 @@ def normalize_db_evidence(
     tables = db_result.get("tables", []) or []
     execution_time_ms = db_result.get("execution_time_ms", 0)
     formatted = db_result.get("formatted_result", "")
+    query_id = db_result.get("query_id", "")
+    sql_fingerprint = db_result.get("sql_fingerprint", "") or _make_sql_fingerprint(sql)
 
-    # 内容用 formatted_result 优先，否则简单序列化前 N 行
-    if formatted:
-        content_raw = formatted
-    else:
-        import json
+    # 表路径（用于 source_uri）
+    table_path = "/".join(tables) if tables else "unknown"
+    # as_of 时间戳（用于数据版本标识）
+    as_of = db_result.get("as_of", _now_iso())
 
-        max_preview_rows = 20
-        preview = rows[:max_preview_rows]
-        content_raw = json.dumps(preview, ensure_ascii=False, default=str)
-        if len(rows) > max_preview_rows:
-            content_raw += f"\n... (共 {row_count} 行，仅展示前 {max_preview_rows} 行)"
+    # ★ v2.1 验收项 21：零行 DB 结果处理
+    # DB 查询返回 0 行时，不生成 DB Evidence，但记录 query 级 provenance
+    # 避免误判为"无证据"——可能是"数据库中确实没有匹配记录"
+    if not rows:
+        source_uri = f"db://{table_path}/{query_id}/{sql_fingerprint}?as_of={as_of}&zero_rows=true"
+        ev: Evidence = {
+            "evidence_id": _make_evidence_id(source_uri, "ZERO_ROWS"),
+            "source_type": "db",
+            "title": f"数据库查询结果（0 行）",
+            "content": "",
+            "structured_data": {"row_count": 0},
+            "source_uri": source_uri,
+            "tenant_id": tenant_id,
+            "confidence": 1.0,  # 查询成功执行，confidence 高
+            "relevance_score": 0.3,  # 但相关性低（无匹配数据）
+            "authority_score": DEFAULT_AUTHORITY_SCORE["db"],
+            "freshness_score": 1.0,
+            "created_at": _now_iso(),
+            "metadata": {
+                "sql": sql,
+                "tables": tables,
+                "row_count": 0,
+                "query_time_ms": execution_time_ms,
+                "source": source,
+                "natural_query": query,
+                "query_id": query_id,
+                "sql_fingerprint": sql_fingerprint,
+                "as_of": as_of,
+                "zero_rows": True,  # ★ 标记零行结果
+            },
+        }
+        # 写入 DB 血缘
+        db_prov: EvidenceProvenance = build_db_provenance(
+            db_id=source or (tables[0].split(".")[0] if tables else ""),
+            table_name=tables[0] if tables else "",
+            query_id=query_id,
+            sql_fingerprint=sql_fingerprint,
+            row_keys=[],
+            step_id=db_result.get("step_id", ""),
+        )
+        attach_provenance_to_evidence(ev, db_prov)
+        return [ev]
 
-    content, truncated = _truncate_content(content_raw, max_chars=2000)
-    content = _scrub_sensitive(content)
-
-    source_uri = f"db://{'/'.join(tables) if tables else 'unknown'}/{hash(sql) & 0xffffffff:x}"
+    # ★ v2.1 验收项 22：聚合 SQL 结果处理
+    # 聚合 SQL（COUNT/SUM/AVG/MAX/MIN）的结果作为整体 Evidence
+    sql_upper = sql.upper().strip()
+    is_aggregate = any(
+        kw in sql_upper for kw in ["COUNT(", "SUM(", "AVG(", "MAX(", "MIN(", "GROUP BY"]
+    )
 
     quality = float(db_result.get("quality_score", 0.8) or 0.8)
 
-    ev: Evidence = {
-        "evidence_id": _make_evidence_id(source_uri, sql + str(row_count)),
-        "source_type": "db",
-        "title": f"数据库查询结果（{len(tables)} 表，{row_count} 行）",
-        "content": content,
-        "structured_data": {
-            "columns": list(rows[0].keys()) if rows else [],
-            "rows": rows[:100],  # 结构化数据保留前 100 行
-        },
-        "source_uri": source_uri,
-        "tenant_id": tenant_id,
-        "confidence": max(0.0, min(1.0, quality)),
-        "relevance_score": max(0.0, min(1.0, quality)),
-        "authority_score": DEFAULT_AUTHORITY_SCORE["db"],
-        "freshness_score": 1.0,  # DB 实时数据
-        "created_at": _now_iso(),
-        "metadata": {
-            "sql": sql,
-            "tables": tables,
-            "row_count": row_count,
-            "query_time_ms": execution_time_ms,
-            "source": source,
-            "truncated": truncated,
-            "natural_query": query,
-        },
-    }
-    # 写入 DB 血缘（按 docs §4.1）
-    db_id = source or (tables[0].split(".")[0] if tables else "")
-    table_name = tables[0] if tables else ""
-    # 行键：取第一列前 N 个值
-    row_keys: list[str] = []
-    if rows:
-        first_col = list(rows[0].keys())[0] if rows else ""
-        for r in rows[:20]:
-            v = r.get(first_col, "") if isinstance(r, dict) else ""
-            if v != "":
-                row_keys.append(f"{first_col}={v}")
-    db_prov: EvidenceProvenance = build_db_provenance(
-        db_id=db_id,
-        table_name=table_name,
-        query_id=db_result.get("query_id", ""),
-        sql_fingerprint=db_result.get("sql_fingerprint", ""),
-        row_keys=row_keys,
-        step_id=db_result.get("step_id", ""),
-    )
-    attach_provenance_to_evidence(ev, db_prov)
-    return [ev]
+    # 聚合 SQL 或行数少（<=5）：作为整体 Evidence，不按行拆分
+    if is_aggregate and len(rows) <= 5:
+        evidences: list[Evidence] = []
+        for row in rows:
+            # 聚合结果的行键
+            row_key = "aggregate_" + "_".join(f"{k}={v}" for k, v in row.items())
+            source_uri = f"db://{table_path}/{query_id}/{sql_fingerprint}/{row_key}?as_of={as_of}"
+            content_raw = json.dumps(row, ensure_ascii=False, default=str)
+            content, truncated = _truncate_content(content_raw, max_chars=2000)
+            content = _scrub_sensitive(content)
+
+            ev = {
+                "evidence_id": _make_evidence_id(source_uri, content_raw),
+                "source_type": "db",
+                "title": f"数据库聚合查询结果（{len(rows)} 行）",
+                "content": content,
+                "structured_data": row,
+                "source_uri": source_uri,
+                "tenant_id": tenant_id,
+                "confidence": max(0.0, min(1.0, quality)),
+                "relevance_score": max(0.0, min(1.0, quality)),
+                "authority_score": DEFAULT_AUTHORITY_SCORE["db"],
+                "freshness_score": 1.0,
+                "created_at": _now_iso(),
+                "metadata": {
+                    "sql": sql,
+                    "tables": tables,
+                    "row_count": row_count,
+                    "query_time_ms": execution_time_ms,
+                    "source": source,
+                    "truncated": truncated,
+                    "natural_query": query,
+                    "query_id": query_id,
+                    "sql_fingerprint": sql_fingerprint,
+                    "as_of": as_of,
+                    "is_aggregate": True,  # ★ 标记聚合结果
+                    "row_key": row_key,
+                },
+            }
+            # 写入 DB 血缘
+            db_prov = build_db_provenance(
+                db_id=source or (tables[0].split(".")[0] if tables else ""),
+                table_name=tables[0] if tables else "",
+                query_id=query_id,
+                sql_fingerprint=sql_fingerprint,
+                row_keys=[row_key],
+                step_id=db_result.get("step_id", ""),
+            )
+            attach_provenance_to_evidence(ev, db_prov)
+            evidences.append(ev)
+        return evidences
+
+    # ★ v2.1 P1-E：行级粒度 Evidence（每行一个 Evidence）
+    # 支持claim级引用——每个事实声明可绑定到具体数据行
+    evidences = []
+    # 行键提取：优先用主键列，否则用第一列
+    first_col = list(rows[0].keys())[0] if rows else ""
+
+    for row in rows:
+        # 行键：主键列值（如 exception_id=EX001）
+        row_key = _extract_row_key(row, first_col)
+
+        source_uri = f"db://{table_path}/{query_id}/{sql_fingerprint}/{row_key}?as_of={as_of}"
+        content_raw = json.dumps(row, ensure_ascii=False, default=str)
+        content, truncated = _truncate_content(content_raw, max_chars=2000)
+        content = _scrub_sensitive(content)
+
+        ev = {
+            "evidence_id": _make_evidence_id(source_uri, content_raw),
+            "source_type": "db",
+            "title": f"数据库查询结果行（{first_col}={row.get(first_col, '')}）",
+            "content": content,
+            "structured_data": row,  # 单行数据
+            "source_uri": source_uri,
+            "tenant_id": tenant_id,
+            "confidence": max(0.0, min(1.0, quality)),
+            "relevance_score": max(0.0, min(1.0, quality)),
+            "authority_score": DEFAULT_AUTHORITY_SCORE["db"],
+            "freshness_score": 1.0,  # DB 实时数据
+            "created_at": _now_iso(),
+            "metadata": {
+                "sql": sql,
+                "tables": tables,
+                "row_count": row_count,
+                "query_time_ms": execution_time_ms,
+                "source": source,
+                "truncated": truncated,
+                "natural_query": query,
+                "query_id": query_id,
+                "sql_fingerprint": sql_fingerprint,
+                "as_of": as_of,
+                "row_key": row_key,
+            },
+        }
+        # 写入 DB 血缘
+        db_prov = build_db_provenance(
+            db_id=source or (tables[0].split(".")[0] if tables else ""),
+            table_name=tables[0] if tables else "",
+            query_id=query_id,
+            sql_fingerprint=sql_fingerprint,
+            row_keys=[row_key],
+            step_id=db_result.get("step_id", ""),
+        )
+        attach_provenance_to_evidence(ev, db_prov)
+        evidences.append(ev)
+
+    return evidences
+
+
+def _extract_row_key(row: dict, first_col: str = "") -> str:
+    """提取行键（用于 source_uri 稳定标识，P1-E）。
+
+    优先使用主键列，否则用第一列。
+
+    Args:
+        row: 单行数据
+        first_col: 第一列名
+
+    Returns:
+        str: 行键字符串（如 "exception_id=EX001"）
+    """
+    if not row or not isinstance(row, dict):
+        return "unknown"
+
+    # 尝试常见主键列名
+    for pk in ("id", "ID", "Id", "exception_id", "uid", "uuid", "key"):
+        if pk in row and row[pk] != "":
+            return f"{pk}={row[pk]}"
+
+    # 回退到第一列
+    if first_col and first_col in row:
+        return f"{first_col}={row[first_col]}"
+
+    # 全部列值拼接（兜底）
+    return "_".join(f"{k}={v}" for k, v in list(row.items())[:3])
 
 
 def normalize_web_evidence(
