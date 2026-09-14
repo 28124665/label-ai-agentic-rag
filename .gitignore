@@ -235,6 +235,11 @@ mcp-db-server/
 .env
 **/.env
 !**/.env.example
+docker/.env.dev
+docker/.env.dev.honghai
+docker/.env.prod
+docker/.env.prod.honghai
+conf/service_conf.yaml
 
 # Local dev configs (never commit)
 .codewhale/
@@ -245,4 +250,3 @@ docs/简历-*.docx
 
 !/node.tar.gz
 !/.nvm/
-!/docker/.env.prod
