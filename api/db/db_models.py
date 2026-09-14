@@ -933,6 +933,18 @@ class File(DataBaseModel):
         db_table = "file"
 
 
+class KBUserPermission(DataBaseModel):
+    id = CharField(max_length=32, primary_key=True)
+    kb_id = CharField(max_length=32, null=False, help_text="knowledge base id", index=True)
+    user_id = CharField(max_length=32, null=False, help_text="user id", index=True)
+    granted_by = CharField(max_length=32, null=False, help_text="who granted the permission")
+    create_time = DateTimeField(null=True, default=datetime.datetime.now)
+    update_time = DateTimeField(null=True, default=datetime.datetime.now)
+
+    class Meta:
+        db_table = "kb_user_permission"
+
+
 class File2Document(DataBaseModel):
     id = CharField(max_length=32, primary_key=True)
     file_id = CharField(max_length=32, null=True, help_text="file id", index=True)

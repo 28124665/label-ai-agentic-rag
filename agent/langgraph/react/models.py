@@ -135,7 +135,7 @@ class ReactState(TypedDict, total=False):
 
 
 class ReactExecutionResult(TypedDict, total=False):
-    """ReAct 子图最终输出。
+    """ReAct 子图最终输出（P0 修正版扩展）。
 
     由 LangGraph 主干读取，进入 evidence_fusion → answerability_check 流程。
     ReAct 子图不直接生成最终答案。
@@ -146,6 +146,19 @@ class ReactExecutionResult(TypedDict, total=False):
     step_count: int
     finish_reason: str
     summary: str  # 子图执行摘要（自然语言）
+
+    # ★ P0 修正：终止信息（供主图 termination_router 消费）
+    termination_reason: str  # same_action_loop / rerank_declining / budget_exhausted / ""
+    termination_source: str  # loop_guard / budget / ""
+    last_action_signature: str  # 最后一次规范化动作签名
+    same_action_count: int  # 连续相同动作计数
+    rerank_score_history: list[float]  # 跨轮 Rerank 最高分历史
+    rerank_drop_count: int  # 连续下降计数
+    budget_snapshot: dict  # 终止时的预算快照
+    can_continue: bool  # 主图是否可继续执行（False 时主图应终止）
+
+    # ★ P0 修正：检索观测列表（供主图合并到请求级历史）
+    retrieval_observations: list[dict]
 
 
 # ========== 默认配置 ==========
@@ -158,6 +171,37 @@ DEFAULT_REACT_BUDGET = {
     "max_latency_ms": 30000,
     "token_budget": 12000,
 }
+
+# ★ P0 修正：LoopGuard 默认配置
+DEFAULT_LOOP_GUARD_CONFIG = {
+    "enabled": True,
+    "max_iterations": 8,
+    "same_action_limit": 3,
+    "rerank_drop_limit": 2,
+    "min_rerank_drop": 0.05,
+    "min_evidence_gain": 1,
+    "absolute_quality_floor": 0.30,
+    "fallback_message": "当前信息不足以回答，建议人工介入",
+}
+
+
+class LoopGuardState(TypedDict, total=False):
+    """请求级 LoopGuard 状态（P0 修正版）。
+
+    由主图初始化，ReAct 子图通过上下文引用使用。
+    在主图和子图间共享动作签名、停滞检测和 Rerank 趋势状态。
+    """
+
+    iteration_count: int
+    max_iterations: int
+    action_signature: str  # 最近一次规范化动作签名
+    same_action_count: int  # 连续相同动作计数
+    rerank_score_history: list[float]  # 跨轮 Rerank 最高分历史
+    rerank_drop_count: int  # 连续下降计数
+    retrieval_observations: list[dict]  # 检索观测列表
+    termination_reason: str
+    termination_source: str
+    fallback_message: str
 
 
 def get_default_budget(deadline_offset_ms: int = DEFAULT_REACT_BUDGET["max_latency_ms"]) -> ReactBudget:

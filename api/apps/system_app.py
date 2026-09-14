@@ -15,7 +15,9 @@
 #
 import logging
 from datetime import datetime
+import ipaddress
 import json
+import os
 
 from api.apps import login_required, current_user
 
@@ -34,7 +36,7 @@ from common.time_utils import current_timestamp, datetime_format
 from timeit import default_timer as timer
 
 from rag.utils.redis_conn import REDIS_CONN
-from quart import jsonify, Response
+from quart import jsonify, Response, request
 from api.utils.health_utils import run_health_checks, get_oceanbase_status
 from api.utils import metrics
 from common import settings
@@ -186,20 +188,67 @@ async def ping():
 @manager.route("/metrics", methods=["GET"])  # noqa: F821
 def metrics_endpoint():
     """
-    Prometheus metrics endpoint.
+    Prometheus metrics endpoint (需鉴权: IP 白名单或 Bearer token).
     ---
     tags:
       - System
     responses:
       200:
         description: Prometheus exposition format metrics.
+      403:
+        description: Forbidden, unauthorized IP or missing token.
     """
+    if not _is_metrics_authorized():
+        return Response("forbidden", status=403)
     try:
         data = metrics.generate_latest()
         return Response(data, mimetype=metrics.CONTENT_TYPE_LATEST)
     except Exception as e:
         logging.exception("Failed to generate metrics")
         return jsonify({"error": str(e)}), 500
+
+
+def _is_metrics_authorized() -> bool:
+    """校验 /metrics 访问权限:IP 白名单 或 Bearer token 二选一。
+
+    优先级:
+    1. METRICS_SCRAPE_IPS 配置后,必须命中 IP 白名单(支持 CIDR)
+    2. METRICS_TOKEN 配置后,必须匹配 Bearer token
+    3. 均未配置时,仅允许内网(10.x / 172.16-31.x / 192.168.x / 127.x)
+    """
+    # 方案 A: IP 白名单(逗号分隔,支持 CIDR)
+    allowed_ips = os.getenv("METRICS_SCRAPE_IPS", "")
+    if allowed_ips:
+        client_ip = request.remote_addr or ""
+        for entry in allowed_ips.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                if "/" in entry:
+                    if ipaddress.ip_address(client_ip) in ipaddress.ip_network(entry, strict=False):
+                        return True
+                elif client_ip == entry:
+                    return True
+            except ValueError:
+                continue
+        # IP 白名单配置后,必须命中才放行
+        return False
+
+    # 方案 B: Bearer token
+    expected_token = os.getenv("METRICS_TOKEN", "")
+    if expected_token:
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header.removeprefix("Bearer ").strip()
+        return token == expected_token
+
+    # 未配置任何鉴权时,仅允许内网
+    client_ip = request.remote_addr or ""
+    try:
+        ip = ipaddress.ip_address(client_ip)
+        return ip.is_private or ip.is_loopback
+    except ValueError:
+        return False
 
 
 @manager.route("/oceanbase/status", methods=["GET"])  # noqa: F821

@@ -18,7 +18,8 @@
 - RAG 文档 → Evidence 转换
 - DB 结果 → Evidence 转换
 - Web 文档 → Evidence 转换
-- 工具名映射（rag_search / db_query / web_search）
+- REST 结果 → Evidence 转换
+- 工具名映射（rag_search / db_query / web_search / rest）
 - 脱敏（手机号、身份证）
 - 截断长内容
 - 去重
@@ -29,6 +30,7 @@ from agent.langgraph.evidence.models import (
     Evidence,
     normalize_db_evidence,
     normalize_rag_evidence,
+    normalize_rest_evidence,
     normalize_tool_result,
     normalize_web_evidence,
 )
@@ -144,6 +146,97 @@ class TestNormalizeWeb:
         assert normalize_web_evidence([]) == []
 
 
+class TestNormalizeRest:
+    """REST/ERP 标准化测试。"""
+
+    def test_basic_rest_doc(self):
+        """基本 REST 文档标准化。"""
+        rest_docs = [
+            {
+                "content": "张三 2024年年假剩余: 5天",
+                "title": "年假余额",
+                "quality_score": 0.88,
+                "function": "query_annual_leave_balance",
+                "endpoint": "/api/hr/leave/balance",
+                "method": "GET",
+                "erp_domain": "hr",
+            }
+        ]
+        evidences = normalize_rest_evidence(
+            rest_docs, tenant_id="t1", query="年假查询", erp_domain="hr"
+        )
+        assert len(evidences) == 1
+        ev = evidences[0]
+        assert ev["source_type"] == "rest"
+        assert ev["authority_score"] == 0.90
+        assert ev["freshness_score"] == 1.0
+        assert "年假" in ev["content"]
+        assert ev["metadata"]["function"] == "query_annual_leave_balance"
+        assert ev["metadata"]["erp_domain"] == "hr"
+        assert ev["metadata"]["method"] == "GET"
+
+    def test_rest_source_uri_format(self):
+        """测试 source_uri 格式。"""
+        rest_docs = [
+            {
+                "content": "采购订单详情",
+                "function": "query_purchase_order",
+                "endpoint": "/api/supply_chain/orders",
+                "erp_domain": "supply_chain",
+            }
+        ]
+        evidences = normalize_rest_evidence(rest_docs, erp_domain="supply_chain")
+        ev = evidences[0]
+        assert ev["source_uri"] == "rest://supply_chain/query_purchase_order//api/supply_chain/orders"
+
+    def test_rest_empty_docs(self):
+        """空列表返回空。"""
+        assert normalize_rest_evidence([]) == []
+
+    def test_rest_dict_content(self):
+        """测试 dict 类型 content 自动序列化。"""
+        rest_docs = [
+            {
+                "content": {"balance": 5, "employee": "张三"},
+                "function": "query_annual_leave_balance",
+                "endpoint": "/api/hr/leave/balance",
+            }
+        ]
+        evidences = normalize_rest_evidence(rest_docs, erp_domain="hr")
+        assert len(evidences) == 1
+        assert "balance" in evidences[0]["content"]
+        assert "张三" in evidences[0]["content"]
+
+    def test_rest_structured_data(self):
+        """测试 structured_data 保留。"""
+        rest_docs = [
+            {
+                "content": "测试数据",
+                "data": {"field1": "value1", "field2": "value2"},
+                "function": "test_func",
+                "endpoint": "/api/test",
+            }
+        ]
+        evidences = normalize_rest_evidence(rest_docs)
+        ev = evidences[0]
+        assert ev["structured_data"] == {"field1": "value1", "field2": "value2"}
+
+    def test_rest_authority_between_db_and_rag(self):
+        """测试 rest 权威性介于 db 和 rag 之间。"""
+        rest_docs = [
+            {
+                "content": "测试",
+                "function": "test",
+                "endpoint": "/api/test",
+            }
+        ]
+        evidences = normalize_rest_evidence(rest_docs)
+        auth = evidences[0]["authority_score"]
+        assert auth == 0.90
+        assert auth > 0.80  # 高于 rag
+        assert auth < 0.95  # 低于 db
+
+
 class TestNormalizeToolResult:
     """统一入口 normalizer 测试。"""
 
@@ -167,6 +260,40 @@ class TestNormalizeToolResult:
         evidences = normalize_tool_result("web_search", result)
         assert len(evidences) == 1
         assert evidences[0]["source_type"] == "web"
+
+    def test_dispatch_rest(self):
+        """rest 分发到 REST normalizer。"""
+        result = {
+            "docs": [
+                {
+                    "content": "年假余额: 5天",
+                    "function": "query_annual_leave_balance",
+                    "endpoint": "/api/hr/leave/balance",
+                    "erp_domain": "hr",
+                }
+            ],
+            "erp_domain": "hr",
+        }
+        evidences = normalize_tool_result("rest", result, tenant_id="t1")
+        assert len(evidences) == 1
+        assert evidences[0]["source_type"] == "rest"
+        assert evidences[0]["authority_score"] == 0.90
+
+    def test_dispatch_rest_search(self):
+        """rest_search 分发到 REST normalizer。"""
+        result = {
+            "docs": [
+                {
+                    "content": "考勤记录",
+                    "function": "query_attendance",
+                    "endpoint": "/api/hr/attendance",
+                }
+            ],
+            "erp_domain": "hr",
+        }
+        evidences = normalize_tool_result("rest_search", result)
+        assert len(evidences) == 1
+        assert evidences[0]["source_type"] == "rest"
 
     def test_unknown_tool_returns_empty(self):
         """未知工具返回空列表。"""
@@ -268,6 +395,62 @@ class TestEvidenceFusion:
         }
         result = fuse_evidences([ev_db, ev_web])
         assert len(result["conflicts"]) >= 1
+
+    def test_fuse_detects_db_rest_conflict(self):
+        """DB + REST 同时存在时检测冲突。"""
+        from agent.langgraph.evidence.fusion import fuse_evidences
+
+        ev_db: Evidence = {
+            "evidence_id": "ev_db",
+            "source_type": "db",
+            "title": "db result",
+            "content": "DB content for users 100 records",
+            "source_uri": "db://users",
+            "relevance_score": 0.8,
+            "authority_score": 0.95,
+            "freshness_score": 1.0,
+        }
+        ev_rest: Evidence = {
+            "evidence_id": "ev_rest",
+            "source_type": "rest",
+            "title": "erp result",
+            "content": "完全不同的ERP数据 0 1 2 3 4 5 6 7 8 9",
+            "source_uri": "rest://hr/query",
+            "relevance_score": 0.85,
+            "authority_score": 0.90,
+            "freshness_score": 1.0,
+        }
+        result = fuse_evidences([ev_db, ev_rest])
+        conflict_types = [c["type"] for c in result["conflicts"]]
+        assert "db_rest_low_overlap" in conflict_types
+
+    def test_fuse_detects_rest_web_conflict(self):
+        """REST + Web 同时存在时检测冲突。"""
+        from agent.langgraph.evidence.fusion import fuse_evidences
+
+        ev_rest: Evidence = {
+            "evidence_id": "ev_rest",
+            "source_type": "rest",
+            "title": "erp result",
+            "content": "ERP数据 0 1 2 3 4 5 6 7 8 9",
+            "source_uri": "rest://hr/query",
+            "relevance_score": 0.85,
+            "authority_score": 0.90,
+            "freshness_score": 1.0,
+        }
+        ev_web: Evidence = {
+            "evidence_id": "ev_web",
+            "source_type": "web",
+            "title": "web result",
+            "content": "完全不同的内容 0 1 2 3 4 5 6 7 8 9",
+            "source_uri": "https://other.com",
+            "relevance_score": 0.7,
+            "authority_score": 0.5,
+            "freshness_score": 0.7,
+        }
+        result = fuse_evidences([ev_rest, ev_web])
+        conflict_types = [c["type"] for c in result["conflicts"]]
+        assert "rest_web_low_overlap" in conflict_types
 
 
 class TestAnswerability:

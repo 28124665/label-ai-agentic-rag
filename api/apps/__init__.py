@@ -59,6 +59,19 @@ def _unauthorized_message(error):
 app = Quart(__name__)
 app = cors(app, allow_origin="*")
 
+# P1-1: OpenTelemetry 分布式追踪初始化
+# 必须在 app 创建后、路由注册前注入 OTel ASGI 中间件
+from api.utils.tracing import init_tracing
+init_tracing(service_name="data-knowledge-api-quart")
+
+# 为 Quart ASGI 应用注入 OTel 中间件,自动为每个 HTTP 请求建立 root span
+# OTel SDK 未安装时跳过,不影响主流程
+try:
+    from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
+    app.asgi_app = OpenTelemetryMiddleware(app.asgi_app)
+except ImportError:
+    pass
+
 # openapi supported
 QuartSchema(app)
 

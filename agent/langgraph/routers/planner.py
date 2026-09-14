@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any, Optional
@@ -39,12 +40,13 @@ class Planner:
         self._timeout_ms = planner_config.get("timeout_ms", 5000)
         self._max_steps = planner_config.get("max_steps", 10)
 
-    async def plan(self, query: str, llm_decision: RouteDecision) -> RouteDecision:
+    async def plan(self, query: str, llm_decision: RouteDecision, kb_ids: list[str] | None = None) -> RouteDecision:
         """执行任务规划。
 
         Args:
             query: 用户查询
             llm_decision: 第2层 LLM 路由的决策结果
+            kb_ids: 可用知识库 ID 列表
 
         Returns:
             RouteDecision: 路由决策（包含执行计划）
@@ -53,7 +55,7 @@ class Planner:
         start_time = time.time()
         try:
             plan = await asyncio.wait_for(
-                self._call_planner(query, llm_decision),
+                self._call_planner(query, llm_decision, kb_ids),
                 timeout=self._timeout_ms / 1000.0,
             )
         except asyncio.TimeoutError:
@@ -72,12 +74,20 @@ class Planner:
 
         # 构建路由决策
         target = self._determine_target(plan)
+        # 收集计划中所有步骤的 kb_ids
+        plan_kb_ids: list[str] = []
+        for step in plan.steps:
+            if step.tool == "rag" and step.args.kb_ids:
+                plan_kb_ids.extend(step.args.kb_ids)
+        # 去重
+        plan_kb_ids = list(dict.fromkeys(plan_kb_ids))
         decision = RouteDecision(
             target=target,
             confidence=llm_decision.confidence,
             source="planner",
             reason=f"Planner 生成执行计划: {len(plan.steps)} 个步骤",
             complexity="complex",
+            kb_ids=plan_kb_ids,
             metadata={
                 "plan": plan.model_dump(),
                 "sub_intents": llm_decision.metadata.get("sub_intents", []),
@@ -142,6 +152,12 @@ class Planner:
 
         assert result.plan is not None
         metadata["plan"] = result.plan.model_dump()
+        # 收集技能计划中所有 RAG 步骤的 kb_ids
+        plan_kb_ids: list[str] = []
+        for step in result.plan.steps:
+            if step.tool == "rag" and step.args.kb_ids:
+                plan_kb_ids.extend(step.args.kb_ids)
+        plan_kb_ids = list(dict.fromkeys(plan_kb_ids))
         logger.info(
             "[Planner] Skill plan generated: %s, steps: %d",
             result.plan.plan_id,
@@ -153,11 +169,12 @@ class Planner:
             source="planner",
             reason=f"Skill planner generated execution plan: {len(result.plan.steps)} steps",
             complexity="complex",
+            kb_ids=plan_kb_ids,
             metadata=metadata,
         )
 
     async def _call_planner(
-        self, query: str, llm_decision: RouteDecision
+        self, query: str, llm_decision: RouteDecision, kb_ids: list[str] | None = None
     ) -> ExecutionPlan:
         """调用 Planner 生成执行计划。
 
@@ -167,6 +184,7 @@ class Planner:
         Args:
             query: 用户查询
             llm_decision: LLM 路由决策
+            kb_ids: 可用知识库 ID 列表
 
         Returns:
             ExecutionPlan: 执行计划
@@ -189,12 +207,16 @@ class Planner:
             "primary_intent": llm_decision.target,
         }
 
+        # 构建 KB 元数据（供 Planner 选择知识库）
+        kb_metadata = json.dumps(kb_ids or [], ensure_ascii=False)
+
         # 渲染 Prompt
         prompt = prompt_manager.render_prompt(
             "planner",
             prompt_version,
             query=query,
-            context=str(context)
+            context=str(context),
+            kb_metadata=kb_metadata,
         )
 
         # 通过 ModelGateway 获取 LLM 调用结果（§5.2 调用点 2）

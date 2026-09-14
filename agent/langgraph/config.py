@@ -98,10 +98,33 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "max_retry_tokens": 2000,
         "min_relevant_docs": 2,
     },
+    # ★ P0 修正：LoopGuard 行为熔断配置（v2.0 §5）
+    "loop_guard": {
+        "enabled": True,
+        "max_iterations": 8,
+        "same_action_limit": 3,
+        "rerank_drop_limit": 2,
+        "min_rerank_drop": 0.05,
+        "min_evidence_gain": 1,
+        "absolute_quality_floor": 0.30,
+        "fallback_message": "当前信息不足以回答，建议人工介入",
+    },
+    # ★ P0 修正：统一终止路由配置（v2.0 §6）
+    "termination": {
+        "enabled": True,
+        "default_fallback_message": "当前信息不足以回答，建议人工介入",
+    },
     "rollout": {
         "strategy": "percentage",
         "percentage": 100,
         "tenant_whitelist": [],
+    },
+    # ★ 父子分块策略（§5.0 父块扩展）
+    "parent_child": {
+        "enabled": True,
+        "full_parent_max_tokens": 1024,
+        "window_context_max_tokens": 2048,
+        "context_window_tokens": 512,
     },
 }
 

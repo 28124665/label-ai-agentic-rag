@@ -16,6 +16,12 @@ P1 混合召回改造（§18.3）：
     - BM25 检索器在启动时由 Catalog 构建，通过 ``get_skill_resolver`` 注入
     - BM25 不可用时透明降级回原关键词匹配
 
+P2 混合召回增强（§10.6 / §10.7）：
+    - Embedding 语义召回：启动时构建向量索引，请求时用 embed_func 向量化 query
+    - RRF 融合：BM25 + Embedding 两路结果用 Reciprocal Rank Fusion 合并
+    - LLM Reranker：对融合后的候选列表用轻量 LLM 重排（§10.7）
+    - 三层降级：Embedding 不可用→仅 BM25；Reranker 不可用→召回分数排序
+
 类比 Java：
     ``SkillResolver`` ≈ ``@Service``，``SkillRegistry`` ≈ ``@Repository``，
     ``SkillResolverLifecycleFilter`` / ``PermissionIntersection`` ≈ 独立的 ``@Component`` 校验器。
@@ -49,21 +55,25 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class HybridRecallConfig:
-    """混合召回配置（P1，§18.3）。
+    """混合召回配置（P1+P2，§18.3 / §10.6 / §10.7）。
 
     Attributes:
         enabled: 是否启用混合召回（默认 True，False=降级为原关键词匹配）
         bm25_top_k: BM25 召回 Top-K（默认 20）
+        embedding_top_k: Embedding 召回 Top-K（默认 20，P2）
         rrf_top_k: RRF 融合后保留 Top-K（默认 20）
-        enable_embedding: 是否启用 Embedding 召回（默认 False，P2+）
-        enable_reranker: 是否启用 LLM Reranker（默认 False，P2+）
+        reranker_max_candidates: Reranker 最大候选数（默认 10，P2）
+        enable_embedding: 是否启用 Embedding 召回（默认 True，P2 已实现）
+        enable_reranker: 是否启用 LLM Reranker（默认 True，P2 已实现）
     """
 
     enabled: bool = True
     bm25_top_k: int = 20
+    embedding_top_k: int = 20
     rrf_top_k: int = 20
-    enable_embedding: bool = False
-    enable_reranker: bool = False
+    reranker_max_candidates: int = 10
+    enable_embedding: bool = True
+    enable_reranker: bool = True
 
 
 class SkillResolver:
@@ -99,7 +109,12 @@ class SkillResolver:
         self._reranker = reranker
         self._recall_config = recall_config or HybridRecallConfig()
 
-    def resolve(self, context: SkillResolveContext) -> SkillResolveResult:
+    def resolve(
+        self,
+        context: SkillResolveContext,
+        embed_func: Any | None = None,
+        llm_call_func: Any | None = None,
+    ) -> SkillResolveResult:
         """Resolve the best report skill set for the supplied context.
 
         解析优先级（§2.1）：
@@ -107,6 +122,12 @@ class SkillResolver:
 
         所有路径均经过 ``_resolve_report_skill`` 的前置过滤，确保未授权/不可用 Skill
         不会进入候选集（§10.3 显式指定 Skill 时也必须经过硬过滤）。
+
+        P2 参数（§10.6 / §10.7）：
+            embed_func: 请求级 Embedding 回调（``Callable[[list[str]], list[list[float]]]``），
+                        用于向量化用户问题。None=不启用 Embedding 召回。
+            llm_call_func: 请求级 LLM 调用回调（``async func(prompt: str) -> str``），
+                           用于 Reranker。None=不启用 LLM 重排。
         """
         # ===== 显式 skill_id 路径 =====
         # §10.3：显式指定 Skill 时也必须经过硬过滤
@@ -126,10 +147,14 @@ class SkillResolver:
             if skill:
                 return self._resolve_report_skill(skill, "report_type", context)
 
-        # ===== keyword 路径（P1 混合召回，降级到原关键词匹配）=====
+        # ===== keyword 路径（P1+P2 混合召回，降级到原关键词匹配）=====
         # §18.3 混合召回：BM25 语义召回替代纯关键词子串匹配
+        # §10.6 RRF 融合：BM25 + Embedding 两路结果合并
+        # §10.7 LLM Reranker：对融合后候选进行重排
         # BM25 索引不可用时透明降级为 _ranked_keyword_candidates()
-        for skill in self._hybrid_recall_candidates(context.user_question, context):
+        for skill in self._hybrid_recall_candidates(
+            context.user_question, context, embed_func, llm_call_func
+        ):
             result = self._resolve_report_skill(skill, "keyword", context)
             if result.resolved:
                 return result
@@ -352,10 +377,42 @@ class SkillResolver:
             if "db" in (skill.required_evidence_types or []):
                 return False
 
+        # §10.3.1 约束2 扩展：graph_tool 禁用时，依赖 graph 能力的 Skill 不得进入候选（设计文档 §3.4.3）
+        graph_tool_config = config.get("graph_tool", {})
+        graph_enabled = (
+            graph_tool_config.get("enabled", True)
+            if isinstance(graph_tool_config, dict)
+            else True
+        )
+        if not graph_enabled and self._skill_requires_graph(skill):
+            return False
+
         # ReAct 禁用检查（§10.3.1 约束3）：P0 阶段 SkillBase 无 execution_mode 字段，跳过
         # P1 Catalog 引入 execution_mode 后补充
 
         return True
+
+    def _skill_requires_graph(self, skill: ReportSkill) -> bool:
+        """判断 ReportSkill 是否声明 graph 证据需求（设计文档 §3.4.2）。
+
+        graph 能力以「证据来源扩展」方式接入：当 required_evidence_types
+        或 linked DataSkill/RetrievalSkill 的 evidence_requirements 含 graph 时，
+        视为依赖 graph 能力。
+        """
+        required_types = {t.casefold() for t in (skill.required_evidence_types or [])}
+        if required_types & {"graph", "graph_rows", "graph_result"}:
+            return True
+        for linked_skill in (
+            self.registry.get_data_for_report(skill.skill_id),
+            self.registry.get_retrieval_for_report(skill.skill_id),
+        ):
+            if linked_skill is None:
+                continue
+            for req in linked_skill.evidence_requirements or []:
+                evidence_type = (req.get("evidence_type") or "").casefold()
+                if evidence_type in {"graph", "graph_rows", "graph_result"}:
+                    return True
+        return False
 
     # ========== 依赖级过滤 ==========
 
@@ -438,25 +495,37 @@ class SkillResolver:
         value = config.get("default_skill_id")
         return value if isinstance(value, str) else None
 
-    # ========== P1 混合召回（§18.3） ==========
+    # ========== P1+P2 混合召回（§18.3 / §10.6 / §10.7） ==========
 
     def _hybrid_recall_candidates(
         self,
         user_question: str,
         context: SkillResolveContext,
+        embed_func: Any | None = None,
+        llm_call_func: Any | None = None,
     ) -> list[ReportSkill]:
-        """混合召回候选（BM25 + 领域分类），降级到原关键词匹配。
+        """混合召回候选（BM25 + Embedding + RRF + Reranker），降级到原关键词匹配。
 
-        流程（§18.3）：
+        流程（§18.3 + §10.6 + §10.7）：
             1. 请求级开关检查：agent_config.skill_router.enabled
             2. 前置过滤：用 _prefilter_skill 过滤所有 ReportSkill，得到合法候选
             3. 领域分类：规则分类器（router.classify_domains_by_rule），缩小候选范围
-            4. BM25 召回：从 BM25 索引搜索，按相关性分数降序
-            5. 降级：BM25 不可用时，走原 _ranked_keyword_candidates()
+            4. BM25 召回：从 BM25 索引搜索（§7.4.1）
+            5. Embedding 召回：用 embed_func 向量化 query，搜索向量索引（§7.4.2，P2）
+            6. RRF 融合：BM25 + Embedding 两路结果合并（§10.6，P2）
+            7. LLM Reranker：对融合后候选进行重排（§10.7，P2）
+            8. 降级：BM25 不可用时，走原 _ranked_keyword_candidates()
+
+        三层降级矩阵：
+            - Embedding 不可用（retriever=None 或 embed_func=None）→ 仅 BM25
+            - Reranker 不可用（reranker=None 或 llm_call_func=None）→ 召回分数排序
+            - BM25 不可用 → 原关键词匹配
 
         Args:
             user_question: 用户提问
             context: 解析上下文（含 agent_config 开关）
+            embed_func: 请求级 Embedding 回调（P2，None=不启用 Embedding 召回）
+            llm_call_func: 请求级 LLM 调用回调（P2，None=不启用 LLM 重排）
 
         Returns:
             按匹配度降序排列的 ReportSkill 列表
@@ -493,12 +562,26 @@ class SkillResolver:
                     return self._ranked_keyword_candidates(user_question)
 
                 # 3c. BM25 搜索
-                results = self._bm25.search(
+                bm25_results = self._bm25.search(
                     user_question, self._recall_config.bm25_top_k
                 )
-                if results:
-                    # 3d. ScoredCard → ReportSkill 列表
-                    return self._scored_to_skills(results, all_reports)
+
+                # 3d. Embedding 召回 + RRF 融合（P2，§10.6）
+                recall_results = self._embedding_recall_and_fuse(
+                    user_question, bm25_results, embed_func
+                )
+
+                if not recall_results:
+                    # 两路都无结果，降级
+                    return self._ranked_keyword_candidates(user_question)
+
+                # 3e. LLM Reranker（P2，§10.7）
+                recall_results = self._rerank_recall_results(
+                    user_question, recall_results, llm_call_func
+                )
+
+                # 3f. ScoredCard → ReportSkill 列表
+                return self._scored_to_skills(recall_results, all_reports)
             except Exception as e:
                 logger.warning(
                     "[SkillResolver] 混合召回异常，降级为关键词匹配: %s", e
@@ -506,6 +589,181 @@ class SkillResolver:
 
         # 4. 降级：原关键词匹配
         return self._ranked_keyword_candidates(user_question)
+
+    def _embedding_recall_and_fuse(
+        self,
+        user_question: str,
+        bm25_results: list[Any],
+        embed_func: Any | None,
+    ) -> list[Any]:
+        """Embedding 召回 + RRF 融合（P2，§10.6）。
+
+        如果 Embedding 不可用（retriever=None / embed_func=None / 索引未构建），
+        直接返回 BM25 结果（降级为单路 BM25）。
+
+        如果两路都有结果，使用 Reciprocal Rank Fusion 融合。
+
+        Args:
+            user_question: 用户提问
+            bm25_results: BM25 召回结果（ScoredCard[]）
+            embed_func: 请求级 Embedding 回调
+
+        Returns:
+            融合后的 ScoredCard 列表（按 RRF 分数降序），或 BM25 单路结果
+        """
+        # Embedding 不可用 → 直接返回 BM25 结果
+        if (
+            self._embedding is None
+            or embed_func is None
+            or not self._recall_config.enable_embedding
+        ):
+            return bm25_results
+
+        try:
+            # 向量化用户问题
+            query_embeddings = embed_func([user_question])
+            # embed_func 可能返回 (vectors, tokens) 元组或直接返回 vectors
+            if isinstance(query_embeddings, tuple):
+                query_vec = query_embeddings[0][0]
+            elif isinstance(query_embeddings, list):
+                query_vec = query_embeddings[0]
+            else:
+                query_vec = query_embeddings
+
+            # Embedding 搜索
+            embedding_results = self._embedding.search(
+                query_vec, self._recall_config.embedding_top_k
+            )
+
+            if not embedding_results:
+                # Embedding 无结果，返回 BM25 单路
+                return bm25_results
+
+            if not bm25_results:
+                # BM25 无结果，返回 Embedding 单路
+                return embedding_results
+
+            # RRF 融合（§10.6）
+            from agent.langgraph.skills.router import reciprocal_rank_fusion
+
+            fused = reciprocal_rank_fusion(
+                bm25_results,
+                embedding_results,
+                top_k=self._recall_config.rrf_top_k,
+            )
+            logger.debug(
+                "[SkillResolver] RRF 融合: BM25=%d, Embedding=%d, 融合后=%d",
+                len(bm25_results),
+                len(embedding_results),
+                len(fused),
+            )
+            return fused
+        except Exception as e:
+            logger.warning(
+                "[SkillResolver] Embedding 召回异常，降级为仅 BM25: %s", e
+            )
+            return bm25_results
+
+    def _rerank_recall_results(
+        self,
+        user_question: str,
+        recall_results: list[Any],
+        llm_call_func: Any | None,
+    ) -> list[Any]:
+        """LLM Reranker 重排（P2，§10.7）。
+
+        如果 Reranker 不可用（reranker=None / llm_call_func=None），
+        直接返回召回分数排序结果（降级）。
+
+        Reranker 超时或异常时，降级到召回分数排序（§10.7.3 约束：不重试）。
+
+        Args:
+            user_question: 用户提问
+            recall_results: 召回融合后的 ScoredCard 列表
+            llm_call_func: 请求级 LLM 调用回调
+
+        Returns:
+            重排后的 ScoredCard 列表（按重排分数降序），或原始召回排序
+        """
+        if (
+            self._reranker is None
+            or llm_call_func is None
+            or not self._recall_config.enable_reranker
+        ):
+            return recall_results
+
+        try:
+            # 截断候选列表（§10.7.3 max_candidates）
+            truncated = recall_results[: self._recall_config.reranker_max_candidates]
+
+            # 更新 reranker 的 LLM 调用回调
+            self._reranker._llm_call = llm_call_func
+
+            # 调用 reranker（async → sync 适配）
+            import asyncio
+
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # 已在事件循环中，创建新循环
+                    loop = asyncio.new_event_loop()
+                    try:
+                        rank_decision = loop.run_until_complete(
+                            self._reranker.rerank(user_question, truncated)
+                        )
+                    finally:
+                        loop.close()
+                else:
+                    rank_decision = loop.run_until_complete(
+                        self._reranker.rerank(user_question, truncated)
+                    )
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                try:
+                    rank_decision = loop.run_until_complete(
+                        self._reranker.rerank(user_question, truncated)
+                    )
+                finally:
+                    loop.close()
+
+            # 如果降级了，保持原始排序
+            if rank_decision.rerank_degraded:
+                logger.debug("[SkillResolver] Reranker 降级，使用召回分数排序")
+                return recall_results
+
+            # 按 Reranker 分数重排 ScoredCard
+            scored_by_id = {s.card.skill_id: s for s in truncated}
+            reranked: list[Any] = []
+            for ranked_cand in rank_decision.candidates:
+                scored = scored_by_id.get(ranked_cand.skill_id)
+                if scored is not None:
+                    # 用 Reranker 分数覆盖召回分数
+                    from agent.langgraph.skills.retrievers.bm25 import ScoredCard
+                    reranked.append(
+                        ScoredCard(
+                            card=scored.card,
+                            score=ranked_cand.score,
+                            source="reranker",
+                        )
+                    )
+            # 补上 Reranker 未覆盖的候选（保留在末尾）
+            reranked_ids = {c.skill_id for c in rank_decision.candidates}
+            for scored in truncated:
+                if scored.card.skill_id not in reranked_ids:
+                    reranked.append(scored)
+
+            logger.debug(
+                "[SkillResolver] Reranker 重排: 输入=%d, 输出=%d, degraded=%s",
+                len(truncated),
+                len(reranked),
+                rank_decision.rerank_degraded,
+            )
+            return reranked
+        except Exception as e:
+            logger.warning(
+                "[SkillResolver] Reranker 异常，降级为召回分数排序: %s", e
+            )
+            return recall_results
 
     def _build_cards_for_recall(
         self,

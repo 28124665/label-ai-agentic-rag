@@ -580,7 +580,8 @@ async def langgraph_completion():
         "llm_id": "xxx",             # LLM模型ID
         "kb_ids": ["xxx"],           # 知识库ID列表
         "db_id": "xxx",              # 数据库ID
-        "conversation_history": []   # 对话历史
+        "conversation_history": [],  # 对话历史
+        "conversation_summary": "",  # 超出 Token 窗口的历史摘要（可选）
     }
 
     响应:
@@ -608,6 +609,7 @@ async def langgraph_completion():
                     kb_ids=req.get("kb_ids", []),
                     db_id=req.get("db_id", ""),
                     conversation_history=req.get("conversation_history", []),
+                    conversation_summary=req.get("conversation_summary", ""),
                 )
 
                 thread_id = result.get("thread_id", "")
@@ -665,6 +667,7 @@ async def langgraph_completion():
                 kb_ids=req.get("kb_ids", []),
                 db_id=req.get("db_id", ""),
                 conversation_history=req.get("conversation_history", []),
+                conversation_summary=req.get("conversation_summary", ""),
             )
             return get_json_result(data=result)
         except Exception as e:

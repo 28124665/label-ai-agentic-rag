@@ -56,6 +56,13 @@ async def clarification_node(state: AgentState) -> dict[str, Any]:
             "node_timings": {"clarification": int((time.time() - start_time) * 1000)},
         }
 
+    # P1-2: 记录 clarification 触发次数
+    try:
+        from api.utils import metrics
+        metrics.rag_clarification_trigger_total.inc()
+    except Exception:
+        pass
+
     # 从 route_decision.metadata 提取澄清信息
     metadata = route_decision.metadata or {}
     question = metadata.get("clarification_question", "您的问题不够明确，请补充更多细节以便我更好地为您服务。")

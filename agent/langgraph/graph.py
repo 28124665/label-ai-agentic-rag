@@ -17,20 +17,23 @@
 
 构建 Agent 工作流的状态图，包括节点注册、边连接和条件路由。
 
-状态图流程（v2.1 §3.2 Claim 级可追溯幻觉检测改造后）：
+状态图流程（v2.1 §3.2 Claim 级可追溯幻觉检测改造后 + ReAct 子图接入 + RestTool）：
   question_input → intent_router → [条件路由]
     ├── clarification → intent_router (用户回答后重新路由)
     ├── rag_tool → [条件路由]
     │     ├── db_tool (hybrid 串行) → evidence_fusion
     │     └── evidence_fusion (非 hybrid)
     ├── db_tool → evidence_fusion
+    ├── react_subgraph → evidence_fusion (DB+RAG 交叉推理)
+    ├── rest_tool → evidence_fusion (ERP 系统 REST API 调用)
     ├── plan_executor → evidence_fusion
     └── prompt_assembly (chitchat)
   web_tool → evidence_fusion
   evidence_fusion → reflection → quality_check → [条件路由]
     ├── prompt_assembly (pass)
     ├── rag_tool / db_tool (retry) → evidence_fusion
-    └── web_tool (fallback_web) → evidence_fusion
+    ├── web_tool (fallback_web) → evidence_fusion
+    └── rest_tool (retry) → evidence_fusion
   prompt_assembly → llm_generate → hallucination → [条件路由]
     ├── answer_renderer → observability → answer_output → END (pass/filter)
     ├── prompt_assembly (regenerate)
@@ -69,6 +72,10 @@ from agent.langgraph.nodes.hallucination import hallucination_node, hallucinatio
 from agent.langgraph.nodes.answer_renderer import answer_renderer_node
 from agent.langgraph.nodes.observability import observability_node
 from agent.langgraph.nodes.final_answer import final_answer_node
+from agent.langgraph.nodes.fallback import fallback_node
+from agent.langgraph.nodes.react_subgraph import react_subgraph_node
+from agent.langgraph.nodes.rest_tool_node import rest_tool_node
+from agent.langgraph.nodes.graph_tool_node import graph_tool_node
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +107,15 @@ def build_agent_graph() -> StateGraph:
     graph.add_node("db_tool", db_tool_node)
     graph.add_node("web_tool", web_tool_node)
     graph.add_node("plan_executor", plan_executor_node)
+    # ★ ReAct 子图节点：DB+RAG 交叉推理（启用需 agent_config.react.enabled = True）
+    # 路由条件：react_enabled + complex + needs_multi_tool + target in (hybrid, database)
+    graph.add_node("react_subgraph", react_subgraph_node)
+    # ★ RestTool 节点：通过 MCP 服务调用 ERP 系统 REST API
+    # 路由条件：RuleRouter 命中 ERP 关键词 + LLMRouter 确认 target="rest"
+    graph.add_node("rest_tool", rest_tool_node)
+    # ★ GraphTool 节点：通过 HTTP 调用 ontology 图问答服务（GraphRAG）
+    # 路由条件：@graph 指令 / RuleRouter 图谱关键词命中 target="graph"
+    graph.add_node("graph_tool", graph_tool_node)
     # ★ v2.1 §3.2 新增：Evidence 融合节点（工具→fusion→reflection→quality_check）
     # 不可变 EvidenceSnapshot 在此构建，确保 prompt_assembly/verifier/references 复用同一快照
     graph.add_node("evidence_fusion", evidence_fusion_node)
@@ -113,6 +129,8 @@ def build_agent_graph() -> StateGraph:
     graph.add_node("answer_renderer", answer_renderer_node)
     graph.add_node("observability", observability_node)
     graph.add_node("answer_output", final_answer_node)
+    # ★ P0 修正：统一终止兜底节点
+    graph.add_node("fallback", fallback_node)
 
     # 3. 设置入口点
     graph.set_entry_point("question_input")
@@ -122,7 +140,8 @@ def build_agent_graph() -> StateGraph:
     # question_input → intent_router
     graph.add_edge("question_input", "intent_router")
 
-    # intent_router → 条件路由（clarification / rag_tool / db_tool / plan_executor / prompt_assembly）
+    # intent_router → 条件路由（clarification / rag_tool / db_tool / react_subgraph / plan_executor / prompt_assembly）
+    # ★ ReAct 子图路由：react_enabled + complex + needs_multi_tool + target in (hybrid, database)
     graph.add_conditional_edges(
         "intent_router",
         route_decision,
@@ -130,7 +149,11 @@ def build_agent_graph() -> StateGraph:
             "clarification": "clarification",
             "rag_tool": "rag_tool",
             "db_tool": "db_tool",
+            "react_subgraph": "react_subgraph",
             "plan_executor": "plan_executor",
+            "rest_tool": "rest_tool",
+            "web_tool": "web_tool",
+            "graph_tool": "graph_tool",
             "prompt_assembly": "prompt_assembly",
         },
     )
@@ -164,6 +187,15 @@ def build_agent_graph() -> StateGraph:
     # ★ v2.1 P0-1 修复：原 web_tool → reflection 改为 → evidence_fusion
     graph.add_edge("web_tool", "evidence_fusion")
 
+    # react_subgraph → evidence_fusion（ReAct 子图完成 DB+RAG 交叉推理后进入融合）
+    graph.add_edge("react_subgraph", "evidence_fusion")
+
+    # rest_tool → evidence_fusion（REST 调用结果进入融合）
+    graph.add_edge("rest_tool", "evidence_fusion")
+
+    # graph_tool → evidence_fusion（图问答结果进入融合）
+    graph.add_edge("graph_tool", "evidence_fusion")
+
     # evidence_fusion → reflection（融合后进入反思）
     # ★ v2.1 §3.2 新增边：snapshot 构建完成后才进入 reflection 评估检索质量
     graph.add_edge("evidence_fusion", "reflection")
@@ -171,7 +203,8 @@ def build_agent_graph() -> StateGraph:
     # reflection → quality_check
     graph.add_edge("reflection", "quality_check")
 
-    # quality_check → 条件路由（prompt_assembly / rag_tool / db_tool / web_tool）
+    # quality_check → 条件路由（prompt_assembly / rag_tool / db_tool / web_tool / fallback）
+    # ★ P0 修正：新增 fallback 路由，termination_reason 非空时走兜底节点
     graph.add_conditional_edges(
         "quality_check",
         quality_check_decision,
@@ -180,6 +213,9 @@ def build_agent_graph() -> StateGraph:
             "rag_tool": "rag_tool",
             "db_tool": "db_tool",
             "web_tool": "web_tool",
+            "rest_tool": "rest_tool",
+            "graph_tool": "graph_tool",
+            "fallback": "fallback",
         },
     )
 
@@ -207,6 +243,10 @@ def build_agent_graph() -> StateGraph:
     # answer_renderer → observability（渲染完成后再记录可观测性指标）
     # ★ v2.1 §3.2 新增边：渲染后的 final_answer 进入 observability 统一埋点
     graph.add_edge("answer_renderer", "observability")
+
+    # fallback → observability（兜底回答直接进入可观测性记录，跳过 claim 渲染）
+    # ★ P0 修正：兜底节点产出的是简单文本答案，无需 claim 级验证
+    graph.add_edge("fallback", "observability")
 
     # observability → answer_output
     graph.add_edge("observability", "answer_output")

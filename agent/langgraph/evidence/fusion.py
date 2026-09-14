@@ -19,7 +19,7 @@
 融合策略（docs §7.4）：
 1. 去重：基于 evidence_id 去重
 2. 排序：按 (authority_score * 0.4 + relevance_score * 0.4 + freshness_score * 0.2) 加权
-3. 冲突检测：DB 与 Web 在同一 key 上结论不一致时记录冲突
+3. 冲突检测：跨来源（DB/Web/Rest/RAG）在同一 key 上结论不一致时记录冲突
 4. token 预算分配：按总字符数等比分配
 """
 from __future__ import annotations
@@ -46,28 +46,44 @@ def _detect_conflicts(evidences: list[Evidence]) -> list[dict]:
     简化实现：基于 source_type + 简单关键词重叠判断。
     生产环境建议用更精细的语义冲突检测。
 
+    冲突对（按权威性降序）：
+    - db vs rest: DB 事实与 ERP 系统数据不一致
+    - db vs web: DB 事实与 Web 结果不一致
+    - rest vs web: ERP 系统数据与 Web 结果不一致
+
     Returns:
         list[dict]: [{evidence_ids, type, description}, ...]
     """
     conflicts: list[dict] = []
-    # 仅检查 db vs web 冲突
+
+    # 按 source_type 分组
     db_evs = [e for e in evidences if e.get("source_type") == "db"]
+    rest_evs = [e for e in evidences if e.get("source_type") == "rest"]
     web_evs = [e for e in evidences if e.get("source_type") == "web"]
-    if db_evs and web_evs:
-        # 简化：如果 DB 和 Web 都存在但内容关键词不重叠，记录潜在冲突
-        for db_ev in db_evs:
-            for web_ev in web_evs:
-                if db_ev.get("content") and web_ev.get("content"):
-                    # 简单判定：内容首 50 字符重叠 < 30% 视为潜在冲突
-                    db_head = db_ev["content"][:50]
-                    web_head = web_ev["content"][:50]
-                    overlap = sum(1 for c in db_head if c in web_head) / max(len(db_head), 1)
+
+    # 检测冲突对：(db, rest), (db, web), (rest, web)
+    conflict_pairs = [
+        (db_evs, rest_evs, "db_rest_low_overlap", "DB 事实与 ERP 系统数据相关性较低，需人工核查"),
+        (db_evs, web_evs, "db_web_low_overlap", "DB 事实与 Web 结果相关性较低，需人工核查"),
+        (rest_evs, web_evs, "rest_web_low_overlap", "ERP 系统数据与 Web 结果相关性较低，需人工核查"),
+    ]
+
+    for high_evs, low_evs, conflict_type, description in conflict_pairs:
+        if not high_evs or not low_evs:
+            continue
+        for high_ev in high_evs:
+            for low_ev in low_evs:
+                if high_ev.get("content") and low_ev.get("content"):
+                    high_head = high_ev["content"][:50]
+                    low_head = low_ev["content"][:50]
+                    overlap = sum(1 for c in high_head if c in low_head) / max(len(high_head), 1)
                     if overlap < 0.3:
                         conflicts.append({
-                            "type": "db_web_low_overlap",
-                            "evidence_ids": [db_ev.get("evidence_id", ""), web_ev.get("evidence_id", "")],
-                            "description": "DB 事实与 Web 结果相关性较低，需人工核查",
+                            "type": conflict_type,
+                            "evidence_ids": [high_ev.get("evidence_id", ""), low_ev.get("evidence_id", "")],
+                            "description": description,
                         })
+
     return conflicts
 
 

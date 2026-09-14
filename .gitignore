@@ -240,6 +240,9 @@ mcp-db-server/
 .codewhale/
 .trae/
 
+# Personal resume (never commit)
+docs/简历-*.docx
+
 !/node.tar.gz
 !/.nvm/
 !/docker/.env.prod

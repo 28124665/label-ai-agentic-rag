@@ -94,6 +94,10 @@ if __name__ == '__main__':
     settings.init_settings()
     settings.print_rag_settings()
 
+    # P1-3: 初始化 Sentry 错误上报(幂等,未配置 DSN 时跳过)
+    from api.utils.error_reporter import init_sentry
+    init_sentry()
+
     if RAGFLOW_DEBUGPY_LISTEN > 0:
         logging.info(f"debugpy listen on {RAGFLOW_DEBUGPY_LISTEN}")
         import debugpy

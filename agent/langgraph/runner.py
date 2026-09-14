@@ -59,6 +59,7 @@ class LangGraphRunner:
         db_id: str = "",
         mcp_server_name: str = "database_mcp_server",
         conversation_history: Optional[list[dict]] = None,
+        conversation_summary: str = "",
         agent_config: Optional[dict] = None,
         **kwargs,
     ) -> AgentState:
@@ -72,6 +73,7 @@ class LangGraphRunner:
             "db_id": db_id,
             "mcp_server_name": mcp_server_name,
             "conversation_history": conversation_history or [],
+            "conversation_summary": conversation_summary,
             "agent_config": agent_config or {},
             "retry_count": 0,
             "max_retries": 3,
@@ -89,6 +91,7 @@ class LangGraphRunner:
         db_id: str = "",
         mcp_server_name: str = "database_mcp_server",
         conversation_history: Optional[list[dict]] = None,
+        conversation_summary: str = "",
         agent_config: Optional[dict] = None,
         **kwargs,
     ) -> dict[str, Any]:
@@ -103,6 +106,7 @@ class LangGraphRunner:
             db_id: 数据库 ID
             mcp_server_name: MCP Server 名称
             conversation_history: 对话历史（供 prompt_assembly 注入上下文）
+            conversation_summary: 对话历史摘要（超出 Token 窗口历史的 LLM 压缩摘要）
             agent_config: Agent 配置（工具参数等）
             **kwargs: 其他参数
 
@@ -119,13 +123,27 @@ class LangGraphRunner:
             db_id=db_id,
             mcp_server_name=mcp_server_name,
             conversation_history=conversation_history,
+            conversation_summary=conversation_summary,
             agent_config=agent_config,
             **kwargs,
         )
 
         logger.info(f"[LangGraphRunner] 开始执行: question='{user_question}'")
 
-        final_state = await compiled.ainvoke(initial_state)
+        try:
+            final_state = await compiled.ainvoke(initial_state)
+        except Exception as e:
+            # P1-3: 异常上报到 Sentry(带 trace_id 关联)
+            try:
+                from api.utils.error_reporter import capture_exception
+                capture_exception(
+                    e,
+                    agent_route_target=initial_state.get("route_target", ""),
+                    agent_trace_id=initial_state.get("trace_id", ""),
+                )
+            except Exception:
+                pass
+            raise
 
         logger.info(f"[LangGraphRunner] 执行完成: answer_len={len(final_state.get('final_answer', ''))}")
 
@@ -141,6 +159,7 @@ class LangGraphRunner:
         db_id: str = "",
         mcp_server_name: str = "database_mcp_server",
         conversation_history: Optional[list[dict]] = None,
+        conversation_summary: str = "",
         agent_config: Optional[dict] = None,
         **kwargs,
     ) -> dict[str, Any]:
@@ -162,6 +181,7 @@ class LangGraphRunner:
                 db_id=db_id,
                 mcp_server_name=mcp_server_name,
                 conversation_history=conversation_history,
+                conversation_summary=conversation_summary,
                 agent_config=agent_config,
                 **kwargs,
             )
@@ -177,6 +197,7 @@ class LangGraphRunner:
         db_id: str = "",
         mcp_server_name: str = "database_mcp_server",
         conversation_history: Optional[list[dict]] = None,
+        conversation_summary: str = "",
         agent_config: Optional[dict] = None,
         **kwargs,
     ):
@@ -194,6 +215,7 @@ class LangGraphRunner:
             db_id: 数据库 ID
             mcp_server_name: MCP Server 名称
             conversation_history: 对话历史（供 prompt_assembly 注入上下文）
+            conversation_summary: 对话历史摘要（超出 Token 窗口历史的 LLM 压缩摘要）
             agent_config: Agent 配置（工具参数等）
             **kwargs: 其他参数
 
@@ -210,6 +232,7 @@ class LangGraphRunner:
             db_id=db_id,
             mcp_server_name=mcp_server_name,
             conversation_history=conversation_history,
+            conversation_summary=conversation_summary,
             agent_config=agent_config,
             **kwargs,
         )
@@ -231,6 +254,7 @@ class LangGraphRunner:
         db_id: str = "",
         mcp_server_name: str = "database_mcp_server",
         conversation_history: Optional[list[dict]] = None,
+        conversation_summary: str = "",
         agent_config: Optional[dict] = None,
         **kwargs,
     ):
@@ -252,6 +276,7 @@ class LangGraphRunner:
                 db_id=db_id,
                 mcp_server_name=mcp_server_name,
                 conversation_history=conversation_history,
+                conversation_summary=conversation_summary,
                 agent_config=agent_config,
                 **kwargs,
             )
@@ -344,7 +369,21 @@ class LangGraphRunner:
             f"question='{user_question}', thread_id={thread_id}"
         )
 
-        final_state = await compiled.ainvoke(initial_state, config=config)
+        try:
+            final_state = await compiled.ainvoke(initial_state, config=config)
+        except Exception as e:
+            # P1-3: 异常上报到 Sentry(带 trace_id 关联)
+            try:
+                from api.utils.error_reporter import capture_exception
+                capture_exception(
+                    e,
+                    agent_route_target=initial_state.get("route_target", ""),
+                    agent_trace_id=initial_state.get("trace_id", ""),
+                    agent_thread_id=thread_id,
+                )
+            except Exception:
+                pass
+            raise
 
         logger.info(f"[LangGraphRunner] 执行完成: thread_id={thread_id}")
 

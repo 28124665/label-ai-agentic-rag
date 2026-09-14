@@ -214,8 +214,36 @@ async def react_subgraph_node(state: AgentState) -> dict[str, Any]:
         f"finish_reason={result.get('finish_reason')}"
     )
 
+    # ★ P0 修正：将 ReAct 子图终止信息回写到主图 AgentState
+    # 主图 termination_router 消费这些字段做统一终止路由
+    termination_reason = result.get("termination_reason", "")
+    termination_source = result.get("termination_source", "")
+    rerank_score_history = result.get("rerank_score_history", [])
+    rerank_drop_count = result.get("rerank_drop_count", 0)
+    retrieval_observations = result.get("retrieval_observations", [])
+    step_count = result.get("step_count", 0)
+
+    # 构造 LoopGuard 状态 dict（供主图观测）
+    loop_guard = {
+        "action_signature": result.get("last_action_signature", ""),
+        "same_action_count": result.get("same_action_count", 0),
+        "rerank_score_history": rerank_score_history,
+        "rerank_drop_count": rerank_drop_count,
+        "retrieval_observations": retrieval_observations,
+        "termination_reason": termination_reason,
+        "termination_source": termination_source,
+    }
+
     return {
         "react_execution_result": result,
         "evidence": merged_evidence,
         "node_timings": {node_name: int((time.time() - start_time) * 1000)},
+        # ★ P0 修正：终止信息回写
+        "termination_reason": termination_reason,
+        "termination_source": termination_source,
+        "loop_guard": loop_guard,
+        "rerank_score_history": rerank_score_history,
+        "rerank_drop_count": rerank_drop_count,
+        "retrieval_observations": retrieval_observations,
+        "agent_iteration_count": step_count,
     }

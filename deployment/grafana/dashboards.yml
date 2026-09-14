@@ -1,0 +1,15 @@
+# Grafana 仪表盘自动配置
+# P2-3: 启动时自动加载 dashboard.json
+
+apiVersion: 1
+
+providers:
+  - name: RAGFlow
+    orgId: 1
+    folder: RAGFlow
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

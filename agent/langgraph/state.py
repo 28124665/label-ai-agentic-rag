@@ -31,7 +31,7 @@ class ToolResult(TypedDict, total=False):
 
     Attributes:
         step_id: 对应 PlanStep.step_id
-        tool: rag / database / web
+        tool: rag / database / web / rest
         success: 是否成功
         error: 失败原因（success=False 时）
         rag_docs: RAG 检索结果
@@ -42,6 +42,8 @@ class ToolResult(TypedDict, total=False):
         db_result: 数据库查询结果
         db_quality_score: 数据库质量评分
         web_docs: Web 搜索结果
+        rest_result: REST 调用结果
+        rest_quality_score: REST 质量评分
         latency_ms: 执行耗时（毫秒）
         db_id: 使用的数据库实例（便于日志追溯）
         kb_ids: 使用的知识库列表
@@ -59,6 +61,14 @@ class ToolResult(TypedDict, total=False):
     db_result: dict
     db_quality_score: float
     web_docs: list[dict]
+    rest_result: dict
+    rest_quality_score: float
+    rest_endpoint: str
+    rest_method: str
+    erp_domain: str
+    graph_result: dict
+    graph_quality_score: float
+    graph_score_source: str
     latency_ms: int
     db_id: str
     kb_ids: list[str]
@@ -115,7 +125,7 @@ class AgentState(TypedDict, total=False):
     mcp_server_name: str
 
     # 路由决策
-    route_target: Literal["rag", "database", "hybrid", "web", "chitchat"]
+    route_target: Literal["rag", "database", "hybrid", "web", "chitchat", "rest", "graph"]
     route_decision: Optional[RouteDecision]  # 三层路由架构的完整决策信息
 
     # Skill 路由（v1.1 §11.1，版本化引用 + 三元审计链）
@@ -161,6 +171,17 @@ class AgentState(TypedDict, total=False):
     # Web Tool 输出
     web_docs: list[dict]  # [{content, url, title}]
 
+    # Rest Tool 输出
+    rest_result: dict  # {status_code, response, response_text, docs, endpoint, method, erp_domain}
+    rest_quality_score: float  # 0.0 ~ 1.0
+
+    # Graph Tool 输出
+    graph_result: dict  # {question, rows, answer, row_count, error, repair_trace, ...}
+    graph_quality_score: float  # 0.0 ~ 1.0
+    graph_score_source: str  # "graph"
+    graph_has_result: bool  # row_count > 0
+    graph_row_count: int
+
     # 融合后的上下文
     merged_context: str
 
@@ -201,6 +222,10 @@ class AgentState(TypedDict, total=False):
 
     # 对话历史（供 prompt_assembly 注入 LLM 上下文）
     conversation_history: list[dict]  # [{role: "user"|"assistant", content: str}]
+
+    # 对话历史摘要（超出 Token 窗口的历史消息的 LLM 压缩摘要）
+    # 为空字符串时行为与改造前完全一致（向后兼容）
+    conversation_summary: str
 
     # Agent 配置（工具参数，从 DB agent 配置传入）
     agent_config: dict  # {tools_config, routing_config, degradation_config, model_config}
@@ -276,3 +301,90 @@ class AgentState(TypedDict, total=False):
 
     # 拒答原因（ENFORCED 模式下 reject 时填充）
     reject_reason: str
+
+    # ========== P0 修正：Agent 循环熔断与统一终止路由（v2.0 §5-6） ==========
+    # 统一请求级迭代计数（主图重试 + Planner + ReAct + 重生成共享）
+    #   - 写入：各工具节点、ReAct 子图、quality_check
+    #   - 读取：termination_router、quality_check
+    agent_iteration_count: int
+    # 请求级最大迭代次数（默认 8，可配置，与 ReAct max_steps 对齐）
+    agent_max_iterations: int
+
+    # LoopGuard 状态（序列化 dict）
+    #   - action_signature: 最近一次规范化动作签名
+    #   - same_action_count: 连续相同动作计数
+    #   - rerank_score_history: 跨轮 Rerank 最高分历史
+    #   - rerank_drop_count: 连续下降计数
+    #   - retrieval_observations: 检索观测列表
+    loop_guard: dict
+
+    # 终止原因与来源
+    #   - termination_reason: same_action_loop / rerank_declining / budget_exhausted / retrieval_infra_error / ""
+    #   - termination_source: loop_guard / budget / quality_check / react_subgraph / ""
+    #   - fallback_message: 兜底消息文本
+    termination_reason: str
+    termination_source: str
+    fallback_message: str
+
+    # 检索观测（跨轮 Rerank 历史）
+    rerank_score_history: list[float]
+    rerank_drop_count: int
+    retrieval_observations: list[dict]
+
+    # RAG 统一元数据（P0 新增，与 RAGToolOutput/RAGResultMetadata 对齐）
+    rag_avg_score: float
+    rag_result_count: int
+    rag_raw_score_source: str
+    rag_query_signature: str
+    rag_evidence_signature: str
+    rag_retrieval_top_k: int
+    rag_rerank_top_k: int
+
+    # ReAct 子图能力开关（从 agent_config.react.enabled 读取，默认 False）
+    #   - 写入：user_question_node（从 agent_config 解析）
+    #   - 读取：route_decision（决定是否路由到 react_subgraph）、react_subgraph_node（防御深度）
+    react_enabled: bool
+
+    # ReAct 子图结果（序列化 ReactExecutionResult dict）
+    react_execution_result: dict
+
+    # ========== Token 预算调度器（docs/Token预算调度器设计方案.md §4） ==========
+    # 总 Token 预算上限（默认 128K × 0.85 = 110K）
+    #   - 写入：图初始化时注入（Runner 或 graph 入口）
+    #   - 读取：evidence_fusion_node / prompt_assembly_node / TokenBudgetScheduler
+    total_token_budget: int
+
+    # 已锁定 Token（System Prompt + Tool Schema），启动时 tiktoken 计算一次
+    #   - 写入：图初始化时注入
+    #   - 读取：evidence_fusion_node、prompt_assembly_node
+    locked_system_tokens: int
+
+    # 已锁定 Token（最近 N 轮对话历史 + 摘要）
+    #   - 写入：图初始化时注入（由 prompt_assembly 在首次运行时计算）
+    #   - 读取：evidence_fusion_node、prompt_assembly_node
+    locked_history_tokens: int
+
+    # 当前激活的工具列表，如 ["rag", "db", "web"]
+    #   - 写入：evidence_fusion_node（通过 _detect_active_tools）
+    #   - 读取：evidence_fusion_node、prompt_assembly_node、observability
+    active_tools: list[str]
+
+    # 各工具实际返回的 Token 数
+    #   - 写入：evidence_fusion_node（通过 TokenBudgetScheduler._count_tool_tokens）
+    #   - 读取：prompt_assembly_node（TokenBudgetScheduler.assemble）
+    tool_token_counts: dict  # {"rag": 12000, "db": 180000, "web": 5000}
+
+    # 超标工具列表（> 30K 豁免阈值）
+    #   - 写入：evidence_fusion_node（通过 TokenBudgetScheduler._identify_overflown_tools）
+    #   - 读取：evidence_fusion_node（压缩触发条件）、prompt_assembly_node、observability
+    overflown_tools: list[str]  # ["db"]
+
+    # 当前压缩级别：normal / light / moderate / severe / compact
+    #   - 写入：evidence_fusion_node（通过 TokenBudgetScheduler.determine_level）
+    #   - 读取：evidence_fusion_node、prompt_assembly_node、observability
+    compression_level: str
+
+    # 精简模式标志（剩余预算 < 2000 时置为 True）
+    #   - 写入：prompt_assembly_node（通过 TokenBudgetScheduler.assemble）
+    #   - 读取：prompt_assembly_node（注入精简指令）、llm_generate
+    compact_mode: bool

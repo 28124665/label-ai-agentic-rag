@@ -28,7 +28,9 @@ import time
 from typing import Any
 
 from agent.langgraph.state import AgentState
+from agent.langgraph.evidence.token_budget import TokenBudgetScheduler
 from api.utils.chunk_preprocessor import extract_original_text
+from common.token_utils import num_tokens_from_string
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,7 @@ def prompt_assembly_node(state: AgentState) -> dict[str, Any]:
     query_lang = state.get("query_lang", "zh_CN")
     route_target = state.get("route_target", "chitchat")
     conversation_history = state.get("conversation_history", []) or []
+    conversation_summary = state.get("conversation_summary", "") or ""
 
     # ★ v2.1 §3.2 改造点 5：优先读取统一 evidence 列表（替代分散字段）
     evidences = state.get("evidence", []) or []
@@ -79,14 +82,33 @@ def prompt_assembly_node(state: AgentState) -> dict[str, Any]:
 
     merged_context = ""
     use_evidence_path = False
+    compact_mode = False
 
-    # 1a. 新路径：统一 Evidence 列表 → 分组格式化（带全局编号 [n] 供引用）
+    # 1a. 新路径：统一 Evidence 列表 → Token 预算感知装配
     if evidences:
-        evidence_context = _format_evidence_context(evidences)
+        # ★ Token 预算调度器：Token 感知装配 + 精简模式
+        tool_token_counts = state.get("tool_token_counts", {})
+        locked_tokens = state.get("locked_system_tokens", 0) + state.get(
+            "locked_history_tokens", 0
+        )
+        total_budget = state.get("total_token_budget", 110000)
+
+        scheduler = TokenBudgetScheduler(total_budget=total_budget)
+        evidence_context, compact_mode, used_tokens = scheduler.assemble(
+            evidences=evidences,
+            tool_token_counts=tool_token_counts,
+            locked_tokens=locked_tokens,
+        )
+
         if evidence_context:
             merged_context = evidence_context
             use_evidence_path = True
-            logger.info(f"[prompt_assembly] Evidence 路径: {len(evidences)} 条, enforcement_mode={enforcement_mode}, snapshot_id={evidence_snapshot_id or 'N/A'}")
+            logger.info(
+                f"[prompt_assembly] Evidence 路径: {len(evidences)} 条, "
+                f"enforcement_mode={enforcement_mode}, "
+                f"snapshot_id={evidence_snapshot_id or 'N/A'}, "
+                f"compact_mode={compact_mode}, used_tokens={used_tokens}"
+            )
 
     # 1b. 回退路径：兼容旧流程，读取 rag_docs/db_result/web_docs 分散字段
     if not use_evidence_path:
@@ -126,6 +148,8 @@ def prompt_assembly_node(state: AgentState) -> dict[str, Any]:
             lang=query_lang,
             enforcement_mode=enforcement_mode,
             conversation_history=conversation_history,
+            conversation_summary=conversation_summary,
+            compact_mode=compact_mode,
         )
     else:
         # 回退路径：沿用原有 _build_prompt（完全向后兼容）
@@ -135,6 +159,7 @@ def prompt_assembly_node(state: AgentState) -> dict[str, Any]:
             query_lang=query_lang,
             route_target=route_target,
             conversation_history=conversation_history,
+            conversation_summary=conversation_summary,
         )
 
     logger.info(f"[prompt_assembly] Prompt 组装完成: context_len={len(merged_context)}, prompt_len={len(final_prompt)}, evidence_path={use_evidence_path}")
@@ -142,6 +167,7 @@ def prompt_assembly_node(state: AgentState) -> dict[str, Any]:
     result: dict[str, Any] = {
         "merged_context": merged_context,
         "final_prompt": final_prompt,
+        "compact_mode": compact_mode,
         "node_timings": {"prompt_assembly": int((time.time() - start_time) * 1000)},
     }
     # 返回 evidence_snapshot_id（如有），供下游 verifier/references 节点复用同一不可变快照
@@ -262,6 +288,7 @@ def _build_prompt(
     query_lang: str,
     route_target: str,
     conversation_history: list[dict] | None = None,
+    conversation_summary: str = "",
 ) -> str:
     """构建最终 Prompt。
 
@@ -274,6 +301,7 @@ def _build_prompt(
         route_target: 路由目标
         conversation_history: 对话历史，``[{role, content}]``，
             最近 10 条会被注入到 Prompt 中以保持上下文连贯性
+        conversation_summary: 超出 Token 窗口的历史摘要
 
     Returns:
         str: 最终 Prompt
@@ -281,8 +309,8 @@ def _build_prompt(
     # 语言输出指令
     lang_instruction = LANGUAGE_INSTRUCTIONS.get(query_lang, LANGUAGE_INSTRUCTIONS["zh_CN"])
 
-    # 对话历史段落（最近 10 条）
-    history_block = _format_conversation_history(conversation_history or [])
+    # 对话历史段落（最近 10 条 + 摘要）
+    history_block = _format_conversation_history(conversation_history or [], conversation_summary)
 
     if route_target == "chitchat" or not merged_context:
         # 闲聊模式或无上下文：直接回答
@@ -317,20 +345,26 @@ def _build_prompt(
     return "\n".join(prompt_parts)
 
 
-def _format_conversation_history(history: list[dict]) -> str:
-    """将对话历史格式化为 Prompt 段落。
+def _format_conversation_history(history: list[dict], summary: str = "") -> str:
+    """将对话历史和摘要格式化为 Prompt 段落。
 
     仅保留最近 10 条消息，避免上下文过长。每条消息以
     ``用户: ...`` 或 ``助手: ...`` 的形式呈现。
+    当有摘要时，在当前对话历史之前注入【历史摘要】段落。
 
     Args:
         history: 对话历史列表，元素为 ``{role, content}``
+        summary: 超出 Token 窗口的历史摘要（可能为空字符串）
 
     Returns:
         str: 格式化后的对话历史段落；为空时返回空字符串
     """
+    parts = []
+    if summary:
+        parts.append(f"【历史摘要】\n{summary}")
+
     if not history:
-        return ""
+        return "\n\n".join(parts) if parts else ""
 
     role_label = {"user": "用户", "assistant": "助手", "system": "系统"}
     recent = history[-10:]
@@ -344,9 +378,10 @@ def _format_conversation_history(history: list[dict]) -> str:
         lines.append(f"{label}: {content}")
 
     # 仅保留至少一条有效历史时才返回段落
-    if len(lines) == 1:
-        return ""
-    return "\n".join(lines)
+    if len(lines) > 1:
+        parts.append("\n".join(lines))
+
+    return "\n\n".join(parts)
 
 
 # ========== v2.1 §3.2 改造点 5：Evidence 优先 + Citation-aware Prompt ==========
@@ -448,6 +483,8 @@ def _build_citation_aware_prompt(
     lang: str,
     enforcement_mode: str,
     conversation_history: list[dict] | None = None,
+    conversation_summary: str = "",
+    compact_mode: bool = False,
 ) -> str:
     """构建 Citation-aware Prompt（v2.1 §3.2 改造点 5）。
 
@@ -463,6 +500,7 @@ def _build_citation_aware_prompt(
         - DISABLED 模式不强制 AST，保持与 legacy 文本流程兼容
         - 两种模式均明确要求"无证据时不编造"，与 ``_build_prompt`` 行为一致
         - 无证据时退化为简单 Prompt（与 ``_build_prompt`` 闲聊分支行为一致）
+        - compact_mode 为 True 时注入精简指令，要求 LLM 仅输出核心结论
 
     Args:
         question: 用户问题
@@ -470,12 +508,14 @@ def _build_citation_aware_prompt(
         lang: 查询语言（zh_CN/zh_TW/en）
         enforcement_mode: 强制级别（disabled/shadow/enforced）
         conversation_history: 对话历史（可选，``[{role, content}]``）
+        conversation_summary: 超出 Token 窗口的历史摘要（可选）
+        compact_mode: 精简模式标志（剩余预算不足时启用）
 
     Returns:
         str: 最终 Prompt
     """
     lang_instruction = LANGUAGE_INSTRUCTIONS.get(lang, LANGUAGE_INSTRUCTIONS["zh_CN"])
-    history_block = _format_conversation_history(conversation_history or [])
+    history_block = _format_conversation_history(conversation_history or [], conversation_summary)
 
     # 无证据时退化为简单 Prompt（与 _build_prompt 闲聊分支行为一致）
     if not evidence_context:
@@ -539,6 +579,14 @@ def _build_citation_aware_prompt(
             [
                 "",
                 evidence_context,
+            ]
+        )
+        if compact_mode:
+            prompt_parts.append(
+                "\n【精简模式】上下文空间不足，请仅输出核心结论（1-3 句话），不要展开详细分析。"
+            )
+        prompt_parts.extend(
+            [
                 "",
                 f"用户问题：{question}",
             ]
@@ -563,6 +611,14 @@ def _build_citation_aware_prompt(
         [
             "",
             evidence_context,
+        ]
+    )
+    if compact_mode:
+        prompt_parts.append(
+            "\n【精简模式】上下文空间不足，请仅输出核心结论（1-3 句话），不要展开详细分析。"
+        )
+    prompt_parts.extend(
+        [
             "",
             f"用户问题：{question}",
             "",

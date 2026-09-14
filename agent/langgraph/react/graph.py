@@ -15,19 +15,26 @@
 """ReAct 子图主循环。
 
 实现受限 ReAct 子图的核心调度循环：
-1. 初始化 ReactState + Budget + Policy Guard
-2. 循环执行 reason → policy → execute → observe → budget_check
+1. 初始化 ReactState + Budget + Policy Guard + LoopGuard
+2. 循环执行 reason → policy → execute → observe → loop_guard → budget_check
 3. 任一终止条件触发即退出循环
 4. 产出 ReactExecutionResult（不直接生成最终答案）
 
 设计原则（docs §5）：
 - 所有工具调用经过 Policy Guard
-- 多维度预算控制
+- 多维度预算控制 + LoopGuard 行为熔断
 - 每一步可观测、可审计
 - 不直接生成最终答案
+
+P0 修正（v2.0）：
+- 新增 Action Signature 规范化 + 连续重复动作检测
+- 新增 Rerank 跨轮历史 + 下降趋势检测
+- 统一预算模型：max_iterations 与 ReAct max_steps 对齐
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from typing import Any, Optional
@@ -42,7 +49,9 @@ from agent.langgraph.react.budget import (
 from agent.langgraph.react.executor import get_react_executor
 from agent.langgraph.react.models import (
     ACTION_TYPE_FINISH,
+    DEFAULT_LOOP_GUARD_CONFIG,
     DEFAULT_REACT_BUDGET,
+    LoopGuardState,
     ReactExecutionResult,
     ReactObservation,
     ReactState,
@@ -60,6 +69,185 @@ logger = logging.getLogger(__name__)
 
 # LLM 调用的简化接口（不直接依赖现有 LLM 客户端）
 LLMCallable = Any  # async def llm_callable(prompt: str) -> str
+
+
+# ========== P0 修正：Action Signature 与 LoopGuard 辅助函数 ==========
+
+def _normalize_action_args(args: dict) -> dict:
+    """规范化工具参数，用于生成稳定签名。
+
+    规则：
+    - 字典按 key 排序
+    - 移除空值、None、默认占位符
+    - 移除敏感字段（token/key/secret）
+    """
+    SENSITIVE_KEYS = {"token", "api_key", "secret", "password", "authorization"}
+    normalized = {}
+    for key in sorted(args.keys()):
+        if key.lower() in SENSITIVE_KEYS:
+            continue
+        value = args[key]
+        if value is None or value == "" or value == {} or value == []:
+            continue
+        normalized[key] = value
+    return normalized
+
+
+def _build_action_signature(
+    action_type: str,
+    arguments: dict,
+    kb_ids: list[str] | None = None,
+    db_id: str = "",
+) -> str:
+    """生成规范化动作签名（SHA-256）。
+
+    至少包含：action_type、规范化参数、知识库/数据库范围。
+    用于跨轮检测"连续相同动作"。
+    """
+    normalized = {
+        "action_type": action_type,
+        "arguments": _normalize_action_args(arguments),
+    }
+    if kb_ids:
+        normalized["kb_ids"] = sorted(kb_ids) if isinstance(kb_ids, list) else kb_ids
+    if db_id:
+        normalized["db_id"] = db_id
+
+    payload = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _build_evidence_signature(evidence_list: list[dict]) -> str:
+    """生成证据签名（基于 evidence_id 集合的稳定哈希）。"""
+    if not evidence_list:
+        return hashlib.sha256(b"empty").hexdigest()
+    ids = sorted(
+        e.get("evidence_id", "") for e in evidence_list if e.get("evidence_id")
+    )
+    if not ids:
+        return hashlib.sha256(b"no_ids").hexdigest()
+    return hashlib.sha256(",".join(ids).encode("utf-8")).hexdigest()
+
+
+def _check_loop_guard_termination(
+    loop_guard: LoopGuardState,
+    loop_config: dict,
+) -> tuple[bool, str]:
+    """检查 LoopGuard 是否触发终止条件。
+
+    Returns:
+        tuple: (should_terminate, termination_reason)
+    """
+    same_action_limit = loop_config.get("same_action_limit", 3)
+    rerank_drop_limit = loop_config.get("rerank_drop_limit", 2)
+
+    # 检查连续相同动作
+    if loop_guard.get("same_action_count", 0) >= same_action_limit:
+        return True, "same_action_loop"
+
+    # 检查 Rerank 连续下降
+    if loop_guard.get("rerank_drop_count", 0) >= rerank_drop_limit:
+        return True, "rerank_declining"
+
+    return False, ""
+
+
+def _update_loop_guard(
+    loop_guard: LoopGuardState,
+    loop_config: dict,
+    action_type: str,
+    arguments: dict,
+    kb_ids: list[str] | None,
+    db_id: str,
+    evidence_before: list[dict],
+    evidence_after: list[dict],
+    rerank_top_score: float | None,
+) -> LoopGuardState:
+    """在实际工具执行后更新 LoopGuard 状态。
+
+    Args:
+        loop_guard: 当前 LoopGuard 状态
+        loop_config: LoopGuard 配置
+        action_type: 工具类型
+        arguments: 实际执行参数
+        kb_ids: 知识库列表
+        db_id: 数据库 ID
+        evidence_before: 执行前证据列表
+        evidence_after: 执行后证据列表
+        rerank_top_score: 本次 RAG 检索的 Rerank 最高分（非 RAG 工具为 None）
+
+    Returns:
+        更新后的 LoopGuardState
+    """
+    min_evidence_gain = loop_config.get("min_evidence_gain", 1)
+    min_rerank_drop = loop_config.get("min_rerank_drop", 0.05)
+    absolute_quality_floor = loop_config.get("absolute_quality_floor", 0.30)
+
+    # 生成当前动作签名
+    current_signature = _build_action_signature(
+        action_type=action_type,
+        arguments=arguments,
+        kb_ids=kb_ids,
+        db_id=db_id,
+    )
+
+    # 证据增量
+    before_ids = {e.get("evidence_id") for e in evidence_before if e.get("evidence_id")}
+    after_ids = {e.get("evidence_id") for e in evidence_after if e.get("evidence_id")}
+    new_ids = after_ids - before_ids
+    evidence_gain = len(new_ids)
+
+    # 更新连续相同动作计数
+    previous_signature = loop_guard.get("action_signature", "")
+    if current_signature == previous_signature and evidence_gain < min_evidence_gain:
+        loop_guard["same_action_count"] = loop_guard.get("same_action_count", 0) + 1
+    else:
+        loop_guard["same_action_count"] = 1
+
+    loop_guard["action_signature"] = current_signature
+
+    # 更新 Rerank 分数历史（仅 RAG 工具）
+    if rerank_top_score is not None and action_type in ("rag_search",):
+        history = list(loop_guard.get("rerank_score_history", []))
+        history.append(rerank_top_score)
+        loop_guard["rerank_score_history"] = history
+
+        # 检查连续下降（至少 3 次有效观测）
+        if len(history) >= 3:
+            last_three = history[-3:]
+            if last_three[2] < last_three[1] < last_three[0]:
+                drop1 = last_three[0] - last_three[1]
+                drop2 = last_three[1] - last_three[2]
+                if drop1 >= min_rerank_drop and drop2 >= min_rerank_drop:
+                    # 必须有证据无增量或绝对质量下限约束
+                    if evidence_gain < min_evidence_gain or (
+                        rerank_top_score < absolute_quality_floor
+                    ):
+                        loop_guard["rerank_drop_count"] = (
+                            loop_guard.get("rerank_drop_count", 0) + 1
+                        )
+                    else:
+                        loop_guard["rerank_drop_count"] = 0
+                else:
+                    loop_guard["rerank_drop_count"] = 0
+            else:
+                loop_guard["rerank_drop_count"] = 0
+
+    # 记录检索观测
+    observation = {
+        "iteration": loop_guard.get("iteration_count", 0),
+        "action_signature": current_signature,
+        "tool_name": action_type,
+        "evidence_gain": evidence_gain,
+        "rerank_top_score": rerank_top_score,
+    }
+    observations = list(loop_guard.get("retrieval_observations", []))
+    observations.append(observation)
+    loop_guard["retrieval_observations"] = observations
+
+    loop_guard["iteration_count"] = loop_guard.get("iteration_count", 0) + 1
+
+    return loop_guard
 
 
 async def _default_llm_callable(prompt: str) -> str:
@@ -104,12 +292,14 @@ class ReactSubgraph:
         self,
         agent_config: Optional[dict] = None,
         react_config: Optional[dict] = None,
+        loop_guard_config: Optional[dict] = None,
     ):
         """初始化 ReAct 子图。
 
         Args:
             agent_config: 完整 agent 配置（用于 Policy Guard + 工具权限）
             react_config: react 子配置（覆盖默认预算/白名单）
+            loop_guard_config: LoopGuard 配置（覆盖默认熔断参数）
         """
         self.agent_config = agent_config or {}
         self.react_config = react_config or self.agent_config.get("react", {}) or {}
@@ -118,6 +308,9 @@ class ReactSubgraph:
         )
         self.policy_guard = PolicyGuard(self.agent_config)
         self.executor = get_react_executor()
+        self.loop_guard_config = loop_guard_config or self.agent_config.get(
+            "loop_guard", {}
+        ) or DEFAULT_LOOP_GUARD_CONFIG
 
     async def run(
         self,
@@ -173,8 +366,26 @@ class ReactSubgraph:
             "evidence": [],
         }
 
+        # ★ P0 修正：初始化 LoopGuard
+        loop_guard: LoopGuardState = {
+            "iteration_count": 0,
+            "max_iterations": self.loop_guard_config.get("max_iterations", 8),
+            "action_signature": "",
+            "same_action_count": 0,
+            "rerank_score_history": [],
+            "rerank_drop_count": 0,
+            "retrieval_observations": [],
+            "termination_reason": "",
+            "termination_source": "",
+            "fallback_message": self.loop_guard_config.get(
+                "fallback_message", "当前信息不足以回答，建议人工介入"
+            ),
+        }
+
         llm_fn = llm_callable or _default_llm_callable
         finish_reason = "completed"
+        termination_reason = ""
+        termination_source = ""
 
         # ========== 主循环 ==========
         while True:
@@ -182,7 +393,24 @@ class ReactSubgraph:
             check = self.budget.can_proceed()
             if not check.allowed:
                 finish_reason = "budget_exhausted"
+                termination_reason = "budget_exhausted"
+                termination_source = "budget"
                 logger.info(f"[react_subgraph] 预算超限终止: {check.reason}")
+                break
+
+            # ★ P0 修正：LoopGuard 终止检查
+            should_terminate, lg_reason = _check_loop_guard_termination(
+                loop_guard, self.loop_guard_config
+            )
+            if should_terminate:
+                finish_reason = lg_reason
+                termination_reason = lg_reason
+                termination_source = "loop_guard"
+                logger.info(
+                    f"[react_subgraph] LoopGuard 终止: reason={lg_reason}, "
+                    f"same_action_count={loop_guard.get('same_action_count', 0)}, "
+                    f"rerank_drop_count={loop_guard.get('rerank_drop_count', 0)}"
+                )
                 break
 
             # 2. LLM 推理
@@ -257,6 +485,8 @@ class ReactSubgraph:
                 )
                 if denied_count >= 3:
                     finish_reason = "policy_denied"
+                    termination_reason = "policy_denied"
+                    termination_source = "policy_guard"
                     logger.warning(
                         f"[react_subgraph] 连续 {denied_count} 次 policy 拒绝，终止"
                     )
@@ -289,6 +519,8 @@ class ReactSubgraph:
 
             # 5. 工具执行
             self.budget.increment_tool_call(action_type)
+            # 记录执行前证据签名（用于 loop guard 证据增量计算）
+            evidence_before = list(state["evidence"])
             observation, evidences = await self.executor.execute(
                 action,
                 tenant_id=tenant_id,
@@ -308,6 +540,36 @@ class ReactSubgraph:
                     for e in state["evidence"]
                 ):
                     state["evidence"].append(ev)
+
+            # ★ P0 修正：LoopGuard 更新（仅对成功执行的动作）
+            if observation.get("success", False):
+                # 提取 Rerank 最高分（仅 RAG 工具）
+                rerank_top_score = None
+                if action_type == "rag_search":
+                    rerank_top_score = observation.get("metadata", {}).get(
+                        "rerank_top_score"
+                    )
+                    if rerank_top_score is None:
+                        # 从 evidence 中尝试提取最高分
+                        ev_scores = [
+                            e.get("relevance_score", 0.0)
+                            for e in evidences
+                            if e.get("relevance_score")
+                        ]
+                        if ev_scores:
+                            rerank_top_score = max(ev_scores)
+
+                loop_guard = _update_loop_guard(
+                    loop_guard=loop_guard,
+                    loop_config=self.loop_guard_config,
+                    action_type=action_type,
+                    arguments=action.get("arguments", {}),
+                    kb_ids=kb_ids,
+                    db_id=db_id,
+                    evidence_before=evidence_before,
+                    evidence_after=list(state["evidence"]),
+                    rerank_top_score=rerank_top_score,
+                )
 
             # 写入 action history
             result_summary = (
@@ -346,6 +608,16 @@ class ReactSubgraph:
             step_count=int(self.budget.snapshot().get("step_count", 0)),
             finish_reason=finish_reason,
             summary=_build_summary(user_question, state, finish_reason),
+            # ★ P0 修正：LoopGuard 终止信息
+            termination_reason=termination_reason,
+            termination_source=termination_source,
+            last_action_signature=loop_guard.get("action_signature", ""),
+            same_action_count=loop_guard.get("same_action_count", 0),
+            rerank_score_history=list(loop_guard.get("rerank_score_history", [])),
+            rerank_drop_count=loop_guard.get("rerank_drop_count", 0),
+            budget_snapshot=self.budget.snapshot(),
+            can_continue=not bool(termination_reason),
+            retrieval_observations=list(loop_guard.get("retrieval_observations", [])),
         )
 
 

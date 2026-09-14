@@ -16,6 +16,7 @@
 import functools
 import json
 import logging
+import time
 from abc import ABC
 from urllib.parse import urljoin
 
@@ -46,9 +47,31 @@ class Base(ABC):
             breaker = getattr(self, "_breaker", None) or get_breaker("rerank")
             if not breaker.allow_request():
                 return Base._rerank_fallback(self, texts)
+            start_ts = time.perf_counter()
             try:
                 result = original(self, query, texts)
                 breaker.record_success()
+
+                # Langfuse Rerank 可观测性上报
+                try:
+                    from api.utils.langfuse_client import record_llm_rerank
+                    from api.utils.tracing import get_current_trace_id
+
+                    duration_ms = (time.perf_counter() - start_ts) * 1000.0
+                    model_name = getattr(self, "model_name", "unknown")
+                    tokens = result[1] if isinstance(result, tuple) and len(result) > 1 else 0
+
+                    record_llm_rerank(
+                        model=model_name,
+                        query=query,
+                        documents=texts,
+                        tokens=tokens,
+                        duration_ms=duration_ms,
+                        trace_id=get_current_trace_id(),
+                    )
+                except Exception:
+                    pass
+
                 return result
             except Exception as e:
                 breaker.record_failure()

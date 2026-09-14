@@ -40,6 +40,10 @@ QUALITY_PASS_THRESHOLD = 0.7  # 保留原常量，向后兼容（= QUALITY_PASS_
 QUALITY_PASS_THRESHOLD_BASE = 0.7  # base 分数阈值（原 QUALITY_PASS_THRESHOLD）
 QUALITY_PASS_THRESHOLD_GRADER = 0.65  # grader_merged 分数阈值（Grader 增强后更严格）
 
+# ★ GraphTool 质量阈值：图问答结果通过阈值（设计文档 §3.2.3）
+# graph score_source 固定为 "graph"，按 0.7 判定（契约分数 0.85 > 0.7，空结果 0.0 触发降级）
+GRAPH_PASS_THRESHOLD = 0.7
+
 # ★ 方案 A：Token 预算默认值（可被 state["retry_token_budget"] 覆盖）
 # 详见设计文档 §4.5.5：retry_token_used 达到 budget 时降级 fallback_web，不再重试
 DEFAULT_RETRY_TOKEN_BUDGET = 2000
@@ -68,6 +72,7 @@ async def quality_check_node(state: AgentState) -> dict[str, Any]:
     - pass：质量达标，进入 prompt_assembly
     - retry_rag：RAG 质量不达标，重试 RAG
     - retry_db：数据库质量不达标，重试数据库查询
+    - retry_graph：图问答质量不达标，重试图问答
     - fallback_web：重试次数用尽，降级到 Web 搜索
 
     当决策为重试时，自动递增 retry_count。
@@ -129,6 +134,12 @@ async def quality_check_node(state: AgentState) -> dict[str, Any]:
         has_relevant = state.get("rag_has_relevant", False)
         relevant_count = state.get("rag_relevant_count", 0)
         score_source = state.get("rag_score_source", "base")  # ★ 方案 A：分数来源
+    elif route_target == "graph":
+        # ★ GraphTool：质量分直接取 graph_tool_node 写入的图问答质量分（设计文档 §3.2.3）
+        quality_score = state.get("graph_quality_score", 0.0)
+        has_relevant = state.get("graph_has_result", False)
+        relevant_count = state.get("graph_row_count", 0)
+        score_source = state.get("graph_score_source", "graph")
 
     # §5.8 前置规则（RAG 检索 infra/auth 失败）：在质量阈值决策之前判定。
     # 服务异常（超时/5xx/熔断）与认证失败时重试无意义——重试一个挂掉的服务
@@ -153,7 +164,12 @@ async def quality_check_node(state: AgentState) -> dict[str, Any]:
 
     # ★ 方案 A：按分数来源选择阈值
     # 详见设计文档 §4.2.4：grader_merged 分数分布偏低，阈值降至 0.65
-    threshold = QUALITY_PASS_THRESHOLD_GRADER if score_source == "grader_merged" else QUALITY_PASS_THRESHOLD_BASE
+    if score_source == "grader_merged":
+        threshold = QUALITY_PASS_THRESHOLD_GRADER
+    elif score_source == "graph":
+        threshold = GRAPH_PASS_THRESHOLD
+    else:
+        threshold = QUALITY_PASS_THRESHOLD_BASE
 
     decision = _make_decision(
         quality_score=quality_score,
@@ -172,13 +188,21 @@ async def quality_check_node(state: AgentState) -> dict[str, Any]:
         f"decision={decision}"
     )
 
+    # P1-2: 记录质量门决策指标
+    try:
+        from api.utils import metrics
+        metrics.rag_quality_check_decision_total.labels(decision=decision).inc()
+        metrics.rag_retry_count.set(retry_count + (1 if decision in ("retry_rag", "retry_db", "retry_graph") else 0))
+    except Exception:
+        pass
+
     updates: dict[str, Any] = {
         "quality_decision": decision,
         "node_timings": {"quality_check": int((time.time() - start_time) * 1000)},
     }
 
     # 重试决策需要递增 retry_count，避免无限循环
-    if decision in ("retry_rag", "retry_db"):
+    if decision in ("retry_rag", "retry_db", "retry_graph"):
         updates["retry_count"] = retry_count + 1
 
     return updates
@@ -229,7 +253,7 @@ def _make_decision(
     1. 闲聊/问候类查询 → 直接通过
     2. 质量达标 → 通过
        - RAG/Hybrid：score >= quality_threshold 且 relevant_count >= 2
-       - Database：score >= quality_threshold 且 row_count > 0
+       - Database/Graph：score >= quality_threshold 且 row_count > 0
     3. 重试次数未用尽 → 重试当前工具
     4. 重试次数用尽 → 降级到 Web 搜索
 
@@ -246,7 +270,7 @@ def _make_decision(
             默认 QUALITY_PASS_THRESHOLD_BASE，未传参时行为与改造前一致
 
     Returns:
-        str: 决策结果（pass / retry_rag / retry_db / fallback_web）
+        str: 决策结果（pass / retry_rag / retry_db / retry_graph / fallback_web）
     """
     if route_target == "chitchat":
         return "pass"
@@ -254,7 +278,7 @@ def _make_decision(
     quality_ok = quality_score >= quality_threshold and has_relevant
 
     # 数据库模式：只要返回有效行数即通过；RAG/Hybrid 仍要求至少 2 条相关文档
-    if route_target == "database":
+    if route_target in ("database", "graph"):
         quality_ok = quality_score >= quality_threshold and relevant_count > 0
     elif route_target in ("rag", "hybrid"):
         quality_ok = quality_score >= quality_threshold and has_relevant and relevant_count >= MIN_RELEVANT_DOCS
@@ -267,6 +291,8 @@ def _make_decision(
             return "retry_rag"
         elif route_target == "database":
             return "retry_db"
+        elif route_target == "graph":
+            return "retry_graph"
 
     return "fallback_web"
 
@@ -274,12 +300,25 @@ def _make_decision(
 def quality_check_decision(state: AgentState) -> str:
     """质量检查条件路由函数，用于 LangGraph 条件边。
 
+    P0 修正：优先检查 termination_reason，非空时走兜底节点。
+
     Args:
         state: 当前 AgentState
 
     Returns:
         str: 下一个节点名称
     """
+    # ★ P0 修正：终止路由优先
+    # 任何 termination_reason 非空都走 fallback_node
+    termination_reason = state.get("termination_reason", "")
+    if termination_reason:
+        logger.info(
+            f"[quality_check_decision] 检测到终止原因: {termination_reason}, "
+            f"source={state.get('termination_source', '')}, "
+            f"路由到 fallback"
+        )
+        return "fallback"
+
     decision = state.get("quality_decision", "pass")
 
     if decision == "pass":
@@ -288,6 +327,8 @@ def quality_check_decision(state: AgentState) -> str:
         return "rag_tool"
     elif decision == "retry_db":
         return "db_tool"
+    elif decision == "retry_graph":
+        return "graph_tool"
     elif decision == "fallback_web":
         return "web_tool"
     else:

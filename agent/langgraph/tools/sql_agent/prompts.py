@@ -77,6 +77,12 @@ def build_system_prompt(
 1. 不要猜测表名和字段名：先 list_tables 看清单，再 describe_table 看结构，最后才写 SQL
 2. {db_directive}
 3. 只生成只读 SELECT 查询（系统会自动追加 LIMIT）
+3a. 字段选择原则（重要）：
+    - 只 SELECT 回答用户问题所必需的字段，严禁 SELECT *
+    - describe_table 后，先判断哪些列与问题相关，再写 SQL
+    - 优先选择：数值列（用于聚合计算）、分类列（GROUP BY）、标识列（id/名称）、时间列
+    - 避免选择：大文本列（description/note/content）、与问题无关的外键列、冗余状态列
+    - 不确定某列是否必需时，宁可多选一列，不要漏掉关键列
 4. execute_sql 报错时，分析错误信息；涉及表/字段不存在时，先 describe_table 确认再修正重试
 5. 查询结果为空时：先检查过滤条件是否过严（时间范围、精确匹配），可放宽后重试一次；
    确认库中确实无相关数据后，用 give_up（reason_type=no_data）明确说明

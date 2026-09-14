@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any, Optional
@@ -97,12 +98,13 @@ class LLMRouter:
         self._max_retries = llm_config.get("max_retries", 1)
         self._confidence_thresholds = llm_config.get("confidence_thresholds", {})
 
-    async def route(self, query: str, rule_decision: RouteDecision) -> RouteDecision:
+    async def route(self, query: str, rule_decision: RouteDecision, kb_ids: list[str] | None = None) -> RouteDecision:
         """执行 LLM 语义路由。
 
         Args:
             query: 用户查询
             rule_decision: 第1层规则路由的决策结果
+            kb_ids: 可用知识库 ID 列表
 
         Returns:
             RouteDecision: 路由决策
@@ -116,7 +118,7 @@ class LLMRouter:
         start_time = time.time()
         try:
             llm_result = await asyncio.wait_for(
-                self._call_llm(query),
+                self._call_llm(query, kb_ids),
                 timeout=self._timeout_ms / 1000.0,
             )
             self._circuit_breaker.record_success()
@@ -170,7 +172,7 @@ class LLMRouter:
             llm_decision.metadata["needs_clarification"] = True
             return llm_decision
 
-    async def _call_llm(self, query: str) -> dict[str, Any]:
+    async def _call_llm(self, query: str, kb_ids: list[str] | None = None) -> dict[str, Any]:
         """调用 LLM 进行意图分类。
 
         通过 ModelGateway（§5.2）获取 LLM 调用结果，使用项目的统一 LLM 调用链路。
@@ -178,6 +180,7 @@ class LLMRouter:
 
         Args:
             query: 用户查询
+            kb_ids: 可用知识库 ID 列表
 
         Returns:
             dict: LLM 返回的结构化结果
@@ -193,11 +196,15 @@ class LLMRouter:
         model_name = llm_config.get("model_id", "qwen3.5-9b")
         prompt_version = llm_config.get("prompt_version", "v1")
 
+        # 构建 KB 元数据（供 LLM 选择知识库）
+        kb_metadata = json.dumps(kb_ids or [], ensure_ascii=False)
+
         # 渲染 Prompt
         prompt = prompt_manager.render_prompt(
             "intent_router",
             prompt_version,
             query=query,
+            kb_metadata=kb_metadata,
         )
 
         # 通过 ModelGateway 获取 LLM 调用结果（§5.2 调用点 1）
@@ -253,6 +260,7 @@ class LLMRouter:
             "database": "database",
             "rag": "rag",
             "web": "web",
+            "rest": "rest",
             "hybrid": "hybrid",
             "chitchat": "chitchat",
         }
@@ -264,6 +272,7 @@ class LLMRouter:
             source="llm",
             reason=reason,
             complexity=complexity,
+            kb_ids=llm_result.get("kb_ids", []),
             metadata={
                 "sub_intents": sub_intents,
                 "entities": entities,

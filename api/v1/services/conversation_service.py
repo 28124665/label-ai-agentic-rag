@@ -12,10 +12,12 @@ import time
 
 from models.conversation import Conversation
 from models.message import Message
+from models.conversation_summary import ConversationSummary
 from models.agent import Agent
 from schemas.conversation import ConversationUpdate
 from core.sse_translator import translate_node_output, format_sse
 from agent.langgraph.runner import get_runner
+from common.token_utils import num_tokens_from_string
 
 logger = logging.getLogger(__name__)
 
@@ -223,19 +225,26 @@ class ConversationService:
             yield format_sse({"type": "error", "error": "对话不存在"})
             return
 
-        # 2. 加载对话历史（当前消息之前的最近 10 条）
-        conversation_history = await self._load_conversation_history(conversation_id, limit=10)
-
-        # 3. 保存用户消息
-        await self.add_message(conversation_id=conversation_id, role="user", content=user_message)
-
-        # 4. 加载 Agent 配置，提取工具参数
+        # 2. 加载 Agent 配置，提取工具参数（提前加载以便获取 llm_id 用于摘要生成）
         agent_config = await self._load_agent_config(conversation.agent_id)
-        kb_ids, db_id, llm_id = self._extract_agent_resources(agent_config)
+        kb_ids, db_id, llm_id = self._extract_agent_resources(agent_config, user_id)
 
         # tenant_id 暂用 user_id（agent/langgraph/tools/rag_tool.py 已有
         # tenant_id 兜底逻辑，后续多租户支持时再解耦）
         tenant_id = user_id
+
+        # 3. 加载对话历史（Token 预算感知 + 摘要压缩）
+        max_tokens = agent_config.get("memory_max_tokens", 2000)
+        conversation_history, conversation_summary = await self._load_conversation_history(
+            conversation_id,
+            max_tokens=max_tokens,
+            max_rounds=20,
+            tenant_id=tenant_id,
+            llm_id=llm_id,
+        )
+
+        # 4. 保存用户消息
+        await self.add_message(conversation_id=conversation_id, role="user", content=user_message)
 
         # 5. 执行 LangGraph 工作流并流式翻译为 SSE
         start_time = time.time()
@@ -254,6 +263,7 @@ class ConversationService:
                 kb_ids=kb_ids,
                 db_id=db_id,
                 conversation_history=conversation_history,
+                conversation_summary=conversation_summary,
                 agent_config=agent_config,
             ):
                 # 收集关键产物用于持久化 assistant 消息
@@ -299,19 +309,27 @@ class ConversationService:
     async def _load_conversation_history(
         self,
         conversation_id: str,
-        limit: int = 10,
-    ) -> List[Dict[str, str]]:
-        """加载当前消息之前的最近 N 条对话历史。
+        max_tokens: int = 2000,
+        max_rounds: int = 20,
+        tenant_id: str = "",
+        llm_id: str = "",
+    ) -> tuple[List[Dict[str, str]], str]:
+        """加载对话历史（Token 预算感知 + 摘要压缩）。
 
-        仅返回 ``user`` / ``assistant`` 角色的消息，按时间正序排列，
-        供 ``prompt_assembly`` 注入 LLM 上下文。
+        从 DB 加载最近 max_rounds 条消息，按 Token 预算填充窗口，
+        超出窗口的消息通过 LLM 摘要压缩后注入上下文。
 
         Args:
             conversation_id: 对话 ID
-            limit: 最大返回条数
+            max_tokens: Token 预算上限
+            max_rounds: 最大回溯轮数（安全上限）
+            tenant_id: 租户 ID（用于摘要 LLM 调用）
+            llm_id: LLM 模型 ID（用于摘要 LLM 调用）
 
         Returns:
-            list[dict]: ``[{role, content}]``
+            tuple: ``(recent_messages, conversation_summary)``
+                - recent_messages: ``[{role, content}]``，Token 预算内的消息
+                - conversation_summary: 超出窗口的历史摘要（可能为空字符串）
         """
         result = await self.db.execute(
             select(Message)
@@ -320,31 +338,273 @@ class ConversationService:
                 Message.role.in_(["user", "assistant"]),
             )
             .order_by(Message.created_at.desc())
-            .limit(limit)
+            .limit(max_rounds)
         )
         messages = result.scalars().all()
-        # 反转为正序，便于在 Prompt 中按时间线呈现
+        # 反转为正序
         messages = list(reversed(messages))
-        return [{"role": msg.role, "content": msg.content or ""} for msg in messages]
+
+        if not messages:
+            return [], ""
+
+        # 转换为 dict 列表（保留 id 用于摘要版本判断）
+        msg_dicts = [
+            {"role": msg.role, "content": msg.content or "", "id": msg.id}
+            for msg in messages
+        ]
+
+        # Token 预算填充窗口
+        recent, overflow = self._fill_token_window(msg_dicts, max_tokens)
+
+        # 提取窗口内消息的 role/content（去除内部 id 字段）
+        recent_messages = [
+            {"role": m["role"], "content": m["content"]} for m in recent
+        ]
+
+        # 摘要生成
+        if overflow:
+            conversation_summary = await self._ensure_summary(
+                conversation_id=conversation_id,
+                overflow_messages=overflow,
+                tenant_id=tenant_id,
+                llm_id=llm_id,
+            )
+            return recent_messages, conversation_summary
+
+        return recent_messages, ""
+
+    @staticmethod
+    def _fill_token_window(
+        messages: list[dict],
+        max_tokens: int,
+    ) -> tuple[list[dict], list[dict]]:
+        """从消息列表（正序）中按 Token 预算填充窗口。
+
+        从最新消息（列表末尾）向前累加 Token，直到超出预算。
+        返回 (窗口内消息, 溢出消息)，均保持正序。
+
+        边界处理：单条消息超过 max_tokens 时，至少保留最近一条。
+
+        Args:
+            messages: 消息列表（正序），每条含 role/content/id
+            max_tokens: Token 预算上限
+
+        Returns:
+            tuple: ``(recent, overflow)``，均保持正序
+        """
+        recent = []
+        token_count = 0
+
+        for msg in reversed(messages):
+            msg_tokens = num_tokens_from_string(msg.get("content", "") or "")
+            if token_count + msg_tokens <= max_tokens:
+                recent.append(msg)
+                token_count += msg_tokens
+            else:
+                break
+
+        recent.reverse()  # 恢复正序
+
+        # 边界：单条消息超过 max_tokens 时，至少保留最近一条
+        if not recent and messages:
+            recent = [messages[-1]]
+            overflow = messages[:-1]
+        else:
+            overflow = messages[: len(messages) - len(recent)]
+
+        return recent, overflow
+
+    async def _ensure_summary(
+        self,
+        conversation_id: str,
+        overflow_messages: list[dict],
+        tenant_id: str = "",
+        llm_id: str = "",
+    ) -> str:
+        """获取或生成对话摘要。
+
+        优先从 DB 读取缓存摘要，若摘要过期（last_message_id 不匹配）
+        则调用 LLM 增量更新。
+
+        Args:
+            conversation_id: 对话 ID
+            overflow_messages: 溢出消息列表（正序，含 id 字段）
+            tenant_id: 租户 ID
+            llm_id: LLM 模型 ID
+
+        Returns:
+            str: 摘要文本（可能为空字符串）
+        """
+        if not overflow_messages:
+            return ""
+
+        # 查询已有摘要
+        result = await self.db.execute(
+            select(ConversationSummary).where(
+                ConversationSummary.conversation_id == conversation_id,
+            )
+        )
+        existing = result.scalar_one_or_none()
+
+        # 摘要过期判断：last_message_id 是否匹配溢出消息的最后一条
+        overflow_last_id = overflow_messages[-1].get("id", "")
+        if existing and existing.last_message_id == overflow_last_id:
+            # 摘要有效，直接复用
+            return existing.summary_text or ""
+
+        # 需要生成/更新摘要
+        if existing:
+            # 增量更新：已有摘要 + 新增溢出消息
+            summary = await self._generate_summary(
+                existing_summary=existing.summary_text,
+                new_messages=overflow_messages,
+                tenant_id=tenant_id,
+                llm_id=llm_id,
+            )
+        else:
+            # 首次生成
+            summary = await self._generate_summary(
+                existing_summary="",
+                new_messages=overflow_messages,
+                tenant_id=tenant_id,
+                llm_id=llm_id,
+            )
+
+        if not summary:
+            return existing.summary_text if existing else ""
+
+        # 写入/更新 DB
+        summary_token_count = num_tokens_from_string(summary)
+        if existing:
+            existing.summary_text = summary
+            existing.last_message_id = overflow_last_id
+            existing.message_count = len(overflow_messages)
+            existing.token_count = summary_token_count
+        else:
+            new_summary = ConversationSummary(
+                conversation_id=conversation_id,
+                summary_text=summary,
+                last_message_id=overflow_last_id,
+                message_count=len(overflow_messages),
+                token_count=summary_token_count,
+            )
+            self.db.add(new_summary)
+
+        await self.db.commit()
+        return summary
+
+    async def _generate_summary(
+        self,
+        existing_summary: str,
+        new_messages: list[dict],
+        tenant_id: str = "",
+        llm_id: str = "",
+    ) -> str:
+        """调用 LLM 生成/更新对话摘要。
+
+        Args:
+            existing_summary: 已有摘要（首次生成时为空字符串）
+            new_messages: 需要摘要的消息列表（正序，含 role/content/id）
+            tenant_id: 租户 ID
+            llm_id: LLM 模型 ID
+
+        Returns:
+            str: 生成的摘要文本
+        """
+        if not tenant_id or not llm_id:
+            logger.warning(
+                "[ConversationService] 摘要生成需要 tenant_id 和 llm_id，跳过"
+            )
+            return ""
+
+        try:
+            from api.db.services.llm_service import LLMBundle
+            from api.db.services.tenant_llm_service import TenantLLMService
+            from common.constants import LLMType
+
+            model_config = TenantLLMService.get_model_config(
+                tenant_id, LLMType.CHAT, llm_id
+            )
+            if not model_config:
+                logger.warning(
+                    f"[ConversationService] 未找到 LLM 配置: tenant={tenant_id}, llm={llm_id}"
+                )
+                return ""
+
+            chat_mdl = LLMBundle(tenant_id, model_config)
+
+            # 构建新增对话文本
+            new_text = "\n".join(
+                f"{'用户' if m['role'] == 'user' else '助手'}: {m.get('content', '')}"
+                for m in new_messages
+            )
+
+            if existing_summary:
+                system_prompt = (
+                    "你是一个对话摘要助手。已有摘要如下：\n\n"
+                    f"{existing_summary}\n\n"
+                    "新增对话：\n"
+                    f"{new_text}\n\n"
+                    "请将以上内容合并为一段简洁的摘要，保留所有关键信息，控制在 300 字以内。使用中文输出。"
+                )
+            else:
+                system_prompt = (
+                    "你是一个对话摘要助手。请将以下对话历史压缩为简洁的摘要，保留关键信息。\n\n"
+                    "要求：\n"
+                    "1. 保留关键实体（人名、项目名、技术术语、数字等）\n"
+                    "2. 保留重要结论和决策\n"
+                    "3. 保留用户明确表达的偏好和需求\n"
+                    "4. 忽略寒暄和无关细节\n"
+                    "5. 摘要长度控制在 300 字以内\n"
+                    "6. 使用中文输出\n\n"
+                    f"对话历史：\n{new_text}\n\n"
+                    "摘要："
+                )
+
+            summary = await chat_mdl.async_chat(
+                system=system_prompt,
+                history=[],
+                gen_conf={},
+            )
+            logger.info(
+                f"[ConversationService] 摘要生成成功: "
+                f"conversation={conversation_id}, "
+                f"messages={len(new_messages)}, "
+                f"summary_tokens={num_tokens_from_string(summary)}"
+            )
+            return summary or ""
+
+        except Exception as e:
+            logger.error(f"[ConversationService] 摘要生成失败: {e}", exc_info=True)
+            return ""
 
     @staticmethod
     def _extract_agent_resources(
         agent_config: Dict[str, Any],
+        user_id: str = "",
     ) -> tuple[List[str], str, str]:
-        """从 Agent 配置中提取知识库、数据库、LLM 资源 ID。
+        """从 Agent 配置中提取知识库、数据库、LLM 资源 ID，
+        并根据用户权限过滤知识库。
 
         Args:
             agent_config: Agent 配置字典
+            user_id: 当前用户 ID，用于权限过滤
 
         Returns:
             tuple: ``(kb_ids, db_id, llm_id)``
         """
+        from api.db.services.kb_permission_service import KBPermissionService
+
         tools_config = agent_config.get("tools_config", {}) or {}
         model_config = agent_config.get("model_config", {}) or {}
 
         kb_ids: List[str] = list(tools_config.get("kb_ids", []) or [])
         db_id = tools_config.get("db_id", "") or ""
         llm_id = model_config.get("llm_id", "") or model_config.get("llm", "") or ""
+
+        # 根据用户权限过滤知识库
+        if user_id:
+            kb_ids = KBPermissionService.filter_permitted_kb_ids(kb_ids, user_id)
 
         return kb_ids, db_id, llm_id
 
@@ -456,12 +716,22 @@ class ConversationService:
                 logger.warning(f"Agent not found: {agent_id}, using default config")
                 return {"tools_config": {"tools": ["rag"]}, "routing_config": {"strategy": "keyword", "rules": []}, "degradation_config": {"max_retries": 0, "fallback": "default"}}
 
-            return {
-                "tools_config": agent.tools_config or {"tools": ["rag"]},
+            tools_config = agent.tools_config or {"tools": ["rag"]}
+            agent_config = {
+                "tools_config": tools_config,
                 "routing_config": agent.routing_config or {"strategy": "keyword", "rules": []},
                 "degradation_config": agent.degradation_config or {"max_retries": 0, "fallback": "default"},
                 "model_config": agent.model_config or {},
             }
+
+            # 挂载 graph 配置：从 tools_config 提升到顶层 agent_config，
+            # 供 GraphTool / graph_tool_node / resolver / planner_adapter 读取（设计文档 §6 第1步 / §3.3.2）
+            for key in ("graph_config", "graph_tool"):
+                value = tools_config.get(key)
+                if isinstance(value, dict):
+                    agent_config[key] = value
+
+            return agent_config
         except Exception as e:
             logger.error(f"Failed to load agent config: {e}")
             return {"tools_config": {"tools": ["rag"]}, "routing_config": {"strategy": "keyword", "rules": []}, "degradation_config": {"max_retries": 0, "fallback": "default"}}

@@ -57,6 +57,7 @@ class SkillPlannerAdapter:
         template_context = self._template_context(context)
         steps = self._build_database_steps(context, template_context)
         steps.extend(self._build_rag_steps(context, template_context))
+        steps.extend(self._build_graph_steps(context, template_context))
         steps.append(self._build_report_step(context, steps))
         plan = ExecutionPlan(
             plan_id=f"{context.skill_set.report_skill.skill_id}_plan",
@@ -165,6 +166,67 @@ class SkillPlannerAdapter:
                 )
             )
         return steps
+
+    def _build_graph_steps(
+        self, context: SkillPlanContext, template_context: dict[str, Any]
+    ) -> list[PlanStep]:
+        """当 Skill 声明 graph 证据需求时，生成图问答 PlanStep（设计文档 §3.4.4）。
+
+        graph 能力以「证据来源扩展」方式接入：与 _build_database_steps /
+        _build_rag_steps 并列，读取 agent_config.graph_config 填充 StepArgs。
+        """
+        if not self._skill_requires_graph(context.skill_set):
+            return []
+
+        report_skill = context.skill_set.report_skill
+        graph_config = context.agent_config.get("graph_config", {}) or {}
+        source_type = str(graph_config.get("source_type", "Meeting"))
+        max_rows = int(graph_config.get("max_rows", 20))
+        max_result_chars = int(graph_config.get("max_result_chars", 12000))
+        enable_hybrid_retrieval = bool(
+            graph_config.get("enable_hybrid_retrieval", False)
+        )
+        enable_pg = bool(graph_config.get("enable_pg", False))
+        timeout_ms = int(graph_config.get("timeout_ms", 30000))
+
+        return [
+            PlanStep(
+                step_id=f"graph_{report_skill.skill_id}",
+                tool="graph",
+                args=StepArgs(
+                    query=context.user_question,
+                    source_type=source_type,
+                    enable_pg=enable_pg,
+                    max_rows=max_rows,
+                    max_result_chars=max_result_chars,
+                    enable_hybrid_retrieval=enable_hybrid_retrieval,
+                    timeout_ms=timeout_ms,
+                    extra={
+                        **self._skill_context(context.skill_set),
+                        "graph_source": "skill_evidence_requirement",
+                    },
+                ),
+                depends_on=[],
+                can_parallel=True,
+                description=f"图谱问答：{report_skill.name}",
+            )
+        ]
+
+    def _skill_requires_graph(self, skill_set: ResolvedSkillSet) -> bool:
+        """判断 ResolvedSkillSet 是否声明 graph 证据需求（设计文档 §3.4.2）。"""
+        required_types = {
+            t.casefold() for t in (skill_set.report_skill.required_evidence_types or [])
+        }
+        if required_types & {"graph", "graph_rows", "graph_result"}:
+            return True
+        for linked in (skill_set.data_skill, skill_set.retrieval_skill):
+            if linked is None:
+                continue
+            for req in linked.evidence_requirements or []:
+                evidence_type = (req.get("evidence_type") or "").casefold()
+                if evidence_type in {"graph", "graph_rows", "graph_result"}:
+                    return True
+        return False
 
     def _build_report_step(
         self, context: SkillPlanContext, evidence_steps: list[PlanStep]

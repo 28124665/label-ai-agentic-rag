@@ -156,5 +156,7 @@ class SkillEvidenceAdapter:
             "db_rows": {"db", "db_rows"},
             "rag": {"rag", "rag_docs"},
             "rag_docs": {"rag", "rag_docs"},
+            "graph": {"graph", "graph_rows"},
+            "graph_rows": {"graph", "graph_rows", "graph_result"},
         }
         return normalized in aliases.get(expected, {expected})

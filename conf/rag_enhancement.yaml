@@ -75,9 +75,40 @@ retry:
   max_retry_tokens: 2000   # Token 预算上限
   min_relevant_docs: 2     # 最小相关文档数（quality_check 决策依据）
 
+# ========== LoopGuard 行为熔断（P0 修正 v2.0 §5） ==========
+# 在 ReAct 子图内部检测连续相同动作和 Rerank 下降趋势，
+# 触发条件时终止子图并回写 termination_reason 到主图。
+loop_guard:
+  enabled: true                        # 是否启用 LoopGuard 熔断
+  max_iterations: 8                    # 最大迭代次数（与 ReAct max_steps 对齐）
+  same_action_limit: 3                 # 连续相同动作次数上限（超限触发 same_action_loop）
+  rerank_drop_limit: 2                 # Rerank 连续下降次数上限（超限触发 rerank_declining）
+  min_rerank_drop: 0.05                # 最小 Rerank 降幅（低于此值不计入下降趋势）
+  min_evidence_gain: 1                 # 最小证据增量（低于此值视为无效检索）
+  absolute_quality_floor: 0.30         # 绝对质量下限（低于此值且证据无增量时触发降级）
+  fallback_message: "当前信息不足以回答，建议人工介入"  # 兜底消息文本
+
+# ========== 统一终止路由（P0 修正 v2.0 §6） ==========
+# 任何终止原因（same_action_loop / rerank_declining / budget_exhausted / policy_denied）
+# 都通过 termination_reason 写回主图，quality_check_decision 路由到 fallback_node。
+termination:
+  enabled: true                        # 是否启用统一终止路由
+  default_fallback_message: "当前信息不足以回答，建议人工介入"  # 默认兜底消息
+
 # ========== 灰度发布 ==========
 # 控制增强能力的灰度范围，配合 Gateway shadow 模式渐进式放量。
 rollout:
   strategy: percentage         # percentage（按百分比）/ tenant_whitelist（按租户白名单）
   percentage: 100              # 流量百分比（0~100），percentage 策略下生效
   tenant_whitelist: []         # 租户白名单列表，tenant_whitelist 策略下生效
+
+# ========== 父子分块策略（§5.0 父块扩展） ==========
+# 检索永远使用小子块（保证向量检索质量），返回时按父块大小采用差异化策略：
+#   ≤ full_parent_max_tokens            → full_parent（完整父块，去重合并）
+#   ≤ window_context_max_tokens         → window_context（子块 + 前后局部上下文窗口）
+#   > window_context_max_tokens         → sub_chunk_only（仅保留子块，避免噪声）
+parent_child:
+  enabled: true                       # 是否启用父块扩展（false 时完全跳过，行为与改造前一致）
+  full_parent_max_tokens: 1024        # 父块 ≤ 此值使用完整父块
+  window_context_max_tokens: 2048     # 父块 ≤ 此值使用窗口截取，> 此值保持子块
+  context_window_tokens: 512          # 窗口截取时子块前后各保留的 token 数

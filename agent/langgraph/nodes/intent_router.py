@@ -71,6 +71,12 @@ def get_skill_resolver() -> SkillResolver:
     P1 扩展（§18.3）：
         从 registry snapshot 获取 BM25 索引并注入 ``SkillResolver``，
         使 keyword 路径使用 BM25 混合召回替代纯关键词匹配。
+
+    P2 扩展（§10.6 / §10.7）：
+        从 registry snapshot 获取 SkillCard 列表，构建 Embedding 索引，
+        注入 EmbeddingRetriever 和 SkillReranker。
+        Embedding 索引构建失败不阻塞，降级为仅 BM25 召回。
+        Reranker 的 llm_call_func 在请求时注入（per-request）。
     """
     global _skill_resolver_instance
     if _skill_resolver_instance is None:
@@ -89,11 +95,183 @@ def get_skill_resolver() -> SkillResolver:
             logger.info(
                 "[SkillResolver] BM25 索引不可用，降级为纯关键词匹配"
             )
+
+        # P2：构建 EmbeddingRetriever（启动时构建向量索引）
+        embedding_retriever = None
+        try:
+            snapshot = registry.current_snapshot
+            cards_by_key = snapshot.get_cards_by_key()
+            if cards_by_key:
+                from agent.langgraph.skills.retrievers import EmbeddingRetriever
+
+                emb_retriever = EmbeddingRetriever()
+                cards = list(cards_by_key.values())
+                # 构建 embed_func（使用默认租户的 Embedding 模型）
+                embed_func = _build_default_embed_func()
+                if embed_func is not None:
+                    import asyncio
+
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            loop = asyncio.new_event_loop()
+                            try:
+                                loop.run_until_complete(
+                                    emb_retriever.build(cards, embed_func)
+                                )
+                            finally:
+                                loop.close()
+                        else:
+                            loop.run_until_complete(
+                                emb_retriever.build(cards, embed_func)
+                            )
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        try:
+                            loop.run_until_complete(
+                                emb_retriever.build(cards, embed_func)
+                            )
+                        finally:
+                            loop.close()
+                    embedding_retriever = emb_retriever
+                    logger.info(
+                        "[SkillResolver] Embedding 索引构建成功，启用 P2 语义召回"
+                    )
+        except Exception as e:
+            logger.info(
+                "[SkillResolver] Embedding 索引不可用，降级为仅 BM25: %s", e
+            )
+
+        # P2：构建 SkillReranker（llm_call_func 在请求时注入）
+        reranker = None
+        try:
+            from agent.langgraph.skills.reranker import SkillReranker
+
+            reranker = SkillReranker(
+                llm_call_func=None,  # 请求时注入
+                timeout_ms=300,
+                max_candidates=10,
+                output_top_k=5,
+            )
+            logger.info("[SkillResolver] SkillReranker 已注入（P2 LLM 重排）")
+        except Exception as e:
+            logger.info(
+                "[SkillResolver] SkillReranker 不可用，降级为召回分数排序: %s", e
+            )
+
         _skill_resolver_instance = SkillResolver(
             registry=registry,
             bm25_retriever=bm25_retriever,
+            embedding_retriever=embedding_retriever,
+            reranker=reranker,
         )
     return _skill_resolver_instance
+
+
+def _build_default_embed_func():
+    """构建默认 embed_func（使用 LLMBundle 的 Embedding 模型）。
+
+    启动时用默认租户构建，用于 EmbeddingRetriever.build() 向量化所有 SkillCard。
+    请求时由 ``_build_request_embed_func`` 按租户构建，用于向量化用户问题。
+
+    Returns:
+        embed_func 或 None（模型不可用时）
+    """
+    try:
+        from api.db.services.llm_service import LLMBundle
+        from common.constants import LLMType
+
+        # 使用系统默认租户（tenant_id="" 获取全局默认模型）
+        bundle = LLMBundle("", LLMType.EMBEDDING, "")
+
+        def embed_func(texts: list[str]) -> list[list[float]]:
+            """同步 Embedding 回调。
+
+            Args:
+                texts: 待向量化的文本列表
+
+            Returns:
+                向量列表 ``[[float, ...], ...]``
+            """
+            embeddings, _ = bundle.encode(texts)
+            return embeddings
+
+        return embed_func
+    except Exception as e:
+        logger.debug("[SkillResolver] 默认 Embedding 模型不可用: %s", e)
+        return None
+
+
+def _build_request_embed_func(tenant_id: str, agent_config: dict | None):
+    """构建请求级 embed_func（按租户解析 Embedding 模型）。
+
+    用于请求时向量化用户问题，传入 SkillResolver.resolve(embed_func=...)。
+
+    Args:
+        tenant_id: 租户 ID
+        agent_config: Agent 配置（可能含 embedding_model_id）
+
+    Returns:
+        embed_func 或 None（模型不可用时）
+    """
+    try:
+        from api.db.services.llm_service import LLMBundle
+        from common.constants import LLMType
+
+        config = agent_config or {}
+        emb_llm_id = config.get("embedding_model_id", "")
+        bundle = LLMBundle(tenant_id, LLMType.EMBEDDING, emb_llm_id)
+
+        def embed_func(texts: list[str]) -> list[list[float]]:
+            embeddings, _ = bundle.encode(texts)
+            return embeddings
+
+        return embed_func
+    except Exception as e:
+        logger.debug("[SkillResolver] 请求级 Embedding 模型不可用: %s", e)
+        return None
+
+
+def _build_request_llm_call_func(tenant_id: str, agent_config: dict | None):
+    """构建请求级 llm_call_func（按租户解析 Router LLM 模型）。
+
+    用于 SkillReranker 的 LLM 重排，传入 SkillResolver.resolve(llm_call_func=...)。
+    返回 async 函数，签名：``async def(prompt: str) -> str``。
+
+    Args:
+        tenant_id: 租户 ID
+        agent_config: Agent 配置（可能含 router_llm_id）
+
+    Returns:
+        async llm_call_func 或 None（模型不可用时）
+    """
+    try:
+        from api.db.services.llm_service import LLMBundle
+        from common.constants import LLMType
+
+        config = agent_config or {}
+        router_llm_id = config.get("router_llm_id", "")
+
+        bundle = LLMBundle(tenant_id, LLMType.CHAT, router_llm_id)
+
+        async def llm_call_func(prompt: str) -> str:
+            """异步 LLM 调用回调（供 SkillReranker 使用）。
+
+            Args:
+                prompt: Reranker 构建好的完整 prompt
+
+            Returns:
+                LLM 输出的原始字符串
+            """
+            system = "你是一个 Skill 路由重排器，请按指令输出 JSON。"
+            history = [{"role": "user", "content": prompt}]
+            content, _ = await bundle.async_chat(system, history, {"temperature": 0})
+            return content
+
+        return llm_call_func
+    except Exception as e:
+        logger.debug("[SkillResolver] 请求级 Router LLM 不可用: %s", e)
+        return None
 
 
 def _resolve_skill(
@@ -105,6 +283,11 @@ def _resolve_skill(
     将 RouteDecision 转换为 SkillResolveContext，调用 SkillResolver.resolve()。
     失败时返回 None，不阻塞主链路路由。
 
+    P2 扩展（§10.6 / §10.7）：
+        从 state 构建请求级 embed_func 和 llm_call_func，
+        传入 resolve() 供 Embedding 召回和 LLM Reranker 使用。
+        模型不可用时 func=None，自动降级为仅 BM25 / 召回分数排序。
+
     Args:
         route_decision: 当前路由决策（含 metadata.report_type 等强信号）
         state: 当前 AgentState（提供 user_question/tenant_id/agent_config）
@@ -114,13 +297,18 @@ def _resolve_skill(
     """
     try:
         resolver = get_skill_resolver()
+        tenant_id = state.get("tenant_id", "")
+        agent_config = state.get("agent_config")
         context = SkillResolveContext(
             user_question=state.get("user_question", ""),
-            tenant_id=state.get("tenant_id", ""),
+            tenant_id=tenant_id,
             route_decision=route_decision.model_dump() if route_decision else None,
-            agent_config=state.get("agent_config"),
+            agent_config=agent_config,
         )
-        return resolver.resolve(context)
+        # P2：构建请求级 embed_func 和 llm_call_func
+        embed_func = _build_request_embed_func(tenant_id, agent_config)
+        llm_call_func = _build_request_llm_call_func(tenant_id, agent_config)
+        return resolver.resolve(context, embed_func, llm_call_func)
     except Exception as e:
         logger.warning(f"[intent_router] Skill 解析失败: {e}", exc_info=True)
         return None
@@ -363,12 +551,22 @@ async def intent_router_node(state: AgentState) -> dict[str, Any]:
     #   - 复杂度闸门判定复杂（rule_decision.confidence=0.0）
     #   - 规则路由 Tier2 弱关键词匹配（confidence < 0.7）
     llm_router = get_llm_router(config)
-    llm_decision = await llm_router.route(user_question, rule_decision)
+    llm_decision = await llm_router.route(user_question, rule_decision, state.get("kb_ids", []))
 
     # 将复杂度闸门的信号注入到 LLM 决策的 metadata 中，供后续 Planner 使用
     if complexity_result.is_complex and llm_decision.metadata is not None:
         llm_decision.metadata["complexity_signals"] = (
             complexity_result.triggered_signals
+        )
+
+    # ★ ReAct 子图：注入 needs_multi_tool 判定（供 route_decision 使用）
+    #   hybrid 目标天然需要多工具协同；complex + database 也可能需要 RAG 补充
+    if llm_decision.metadata is None:
+        llm_decision.metadata = {}
+    if "needs_multi_tool" not in llm_decision.metadata:
+        llm_decision.metadata["needs_multi_tool"] = (
+            llm_decision.target == "hybrid"
+            or (llm_decision.complexity == "complex" and llm_decision.target in ("hybrid", "database"))
         )
 
     logger.info(
@@ -413,7 +611,7 @@ async def intent_router_node(state: AgentState) -> dict[str, Any]:
 
     # 无 Skill → 自由 plan()
     planner = get_planner(config)
-    planner_decision = await planner.plan(user_question, llm_decision)
+    planner_decision = await planner.plan(user_question, llm_decision, state.get("kb_ids", []))
 
     logger.info(
         f"[intent_router] 第3层Planner: '{user_question}' -> "
@@ -437,7 +635,12 @@ def route_decision(state: AgentState) -> str:
     2. Planner 复杂任务 → plan_executor（并行执行 DAG 计划）
     3. RAG/Hybrid → rag_tool
     4. Database → db_tool
-    5. Chitchat/Web → prompt_assembly
+    5. Web → web_tool
+    6. Rest → rest_tool
+    7. Graph → graph_tool
+    8. Chitchat/其他 → prompt_assembly
+
+    P1-2: 在路由目标确定后记录 Prometheus 指标。
 
     Args:
         state: 当前 AgentState
@@ -454,26 +657,67 @@ def route_decision(state: AgentState) -> str:
         and route_decision_data.metadata
         and route_decision_data.metadata.get("needs_clarification")
     ):
+        _record_route_metric("clarification")
         return "clarification"
 
+    # ★ ReAct 子图路由（优先级高于 Planner）：
+    #   触发条件：react_enabled + complex + needs_multi_tool + 目标为 hybrid/database
+    #   路由到 react_subgraph 支持 DB/RAG 多轮交替推理
+    if (
+        state.get("react_enabled", False)
+        and route_decision_data
+        and route_decision_data.complexity == "complex"
+        and route_decision_data.metadata
+        and route_decision_data.metadata.get("needs_multi_tool")
+        and route_target in ("hybrid", "database")
+    ):
+        _record_route_metric("react_subgraph")
+        logger.info(f"[route_decision] 路由到 react_subgraph: target={route_target}, "
+                    f"complexity={route_decision_data.complexity}")
+        return "react_subgraph"
+
     # ★ Planner 生成的复杂任务走计划执行器（支持多工具并行）
+    #   ReAct 未启用或 needs_multi_tool=False 时走此路径
     if (
         route_decision_data
         and route_decision_data.source == "planner"
         and route_decision_data.complexity == "complex"
     ):
+        _record_route_metric("plan_executor")
         return "plan_executor"
 
     if route_target == "rag":
+        _record_route_metric("rag")
         return "rag_tool"
     elif route_target == "database":
+        _record_route_metric("database")
         return "db_tool"
     elif route_target == "hybrid":
         # hybrid：先 RAG，再由 after_rag_tool 串行进入 db_tool
+        _record_route_metric("hybrid")
         return "rag_tool"
+    elif route_target == "web":
+        _record_route_metric("web")
+        return "web_tool"
+    elif route_target == "rest":
+        _record_route_metric("rest")
+        return "rest_tool"
+    elif route_target == "graph":
+        _record_route_metric("graph")
+        return "graph_tool"
     else:
         # chitchat 或其他 -> 直接到 prompt_assembly
+        _record_route_metric("chitchat")
         return "prompt_assembly"
+
+
+def _record_route_metric(target: str) -> None:
+    """P1-2: 记录路由决策分布指标。"""
+    try:
+        from api.utils import metrics
+        metrics.rag_intent_route_total.labels(target=target).inc()
+    except Exception:
+        pass
 
 
 def after_rag_tool(state: AgentState) -> str:

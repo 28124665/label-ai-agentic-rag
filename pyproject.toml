@@ -123,6 +123,14 @@ dependencies = [
     "yfinance==0.2.65",
     "zhipuai==2.0.1",
     "peewee>=3.17.1,<4.0.0",
+    # P1-1: OpenTelemetry 分布式追踪
+    "opentelemetry-api>=1.24.0",
+    "opentelemetry-sdk>=1.24.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.24.0",
+    "opentelemetry-instrumentation-asgi>=0.45b0",
+    "opentelemetry-instrumentation-logging>=0.45b0",
+    # P1-3: Sentry 错误上报
+    "sentry-sdk[httpx]>=1.40.0,<2.0.0",
     #    following modules aren't necessary
     #    "nltk==3.9.1",
     #    "numpy>=1.26.0,<2.0.0",
@@ -187,6 +195,9 @@ test = [
     "pycryptodomex==3.20.0",
     "pytest-playwright>=0.7.2",
     "codecov>=2.1.13",
+    # RAGAS evaluation framework for RAG pipeline quality assessment
+    "ragas>=0.2.0",
+    "langchain-openai>=0.2.0",
 ]
 
 [[tool.uv.index]]
@@ -229,6 +240,8 @@ markers = [
     "p3: low priority test cases",
     "smoke: smoke test cases",
     "auth: authentication UI tests",
+    "ragas: RAGAS evaluation integration tests (requires OPENAI_API_KEY)",
+    "integration: integration tests that require external services",
 ]
 
 # Test collection and runtime configuration

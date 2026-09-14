@@ -490,3 +490,77 @@ def record_grader_hit(kb_id: str, has_relevant: bool) -> None:
 def record_faithfulness_score(kb_id: str, score: float) -> None:
     """Record hallucination detector faithfulness score."""
     rag_faithfulness_score.labels(kb_id=kb_id or "unknown").set(score)
+
+
+# ---------------------------------------------------------------------------
+# P0-1: 供 observability 节点调用的便捷函数（修复静默失败 bug）
+# ---------------------------------------------------------------------------
+
+# 幻觉检测全局分数（无 kb_id 维度，适配 observability 节点调用）
+rag_hallucination_score = Gauge(
+    "rag_hallucination_score",
+    "Hallucination verification score (0-1) from PolicyEngine.",
+)
+
+# 幻觉检测 action 分布
+rag_hallucination_action_total = Counter(
+    "rag_hallucination_action_total",
+    "Total count of hallucination actions by type.",
+    ("action",),  # pass / filter / regenerate / reject / exhausted
+)
+
+
+def record_e2e_latency(seconds: float) -> None:
+    """记录端到端延迟（供 observability 节点调用）。
+
+    复用已有 rag_e2e_latency_seconds Histogram，无 kb_id 时用 "global"。
+    """
+    rag_e2e_latency_seconds.labels(kb_id="global").observe(seconds)
+
+
+def record_hallucination_score(score: float, action: str) -> None:
+    """记录幻觉检测分数与 action（供 observability 节点调用）。
+
+    Args:
+        score: PolicyEngine 加权忠实度分数 (0-1)
+        action: 最终决策 pass/filter/regenerate/reject/exhausted
+    """
+    rag_hallucination_score.set(score)
+    rag_hallucination_action_total.labels(action=action or "unknown").inc()
+
+
+# ---------------------------------------------------------------------------
+# P1-2: 中间态可观测性指标
+# ---------------------------------------------------------------------------
+
+# 路由决策分布
+rag_intent_route_total = Counter(
+    "rag_intent_route_total",
+    "Total count of intent router decisions by target.",
+    ("target",),  # rag / db / hybrid / chitchat / clarification
+)
+
+# 质量门决策分布
+rag_quality_check_decision_total = Counter(
+    "rag_quality_check_decision_total",
+    "Total count of quality_check decisions.",
+    ("decision",),  # pass / retry_rag / retry_db / fallback_web
+)
+
+# 当前重试次数（每次请求结束时观测）
+rag_retry_count = Gauge(
+    "rag_retry_count",
+    "Number of retries consumed for current request.",
+)
+
+# Evidence 快照重建次数
+rag_evidence_snapshot_rebuild_total = Counter(
+    "rag_evidence_snapshot_rebuild_total",
+    "Total count of evidence snapshot rebuilds.",
+)
+
+# Clarification 触发次数
+rag_clarification_trigger_total = Counter(
+    "rag_clarification_trigger_total",
+    "Total count of clarification triggers.",
+)

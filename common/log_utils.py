@@ -22,7 +22,17 @@ from common.file_utils import get_project_base_directory
 
 initialized_root_logger = False
 
-def init_root_logger(logfile_basename: str, log_format: str = "%(asctime)-15s %(levelname)-8s %(process)d %(message)s"):
+def init_root_logger(logfile_basename: str, log_format: str = None):
+    """初始化 root logger。
+
+    P2-4: 统一使用 JSON 结构化日志格式(复用 structured_logger.JSONFormatter)。
+    OTel LoggingInstrumentor 会自动注入 trace_id / span_id 到 LogRecord。
+    log_format 参数保留向后兼容,但不再使用(统一 JSON)。
+
+    Args:
+        logfile_basename: 日志文件基名(不含扩展名)
+        log_format: 已废弃,保留向后兼容
+    """
     global initialized_root_logger
     if initialized_root_logger:
         return
@@ -33,7 +43,16 @@ def init_root_logger(logfile_basename: str, log_format: str = "%(asctime)-15s %(
     log_path = os.path.abspath(os.path.join(get_project_base_directory(), "logs", f"{logfile_basename}.log"))
 
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    formatter = logging.Formatter(log_format)
+
+    # P2-4: 统一使用 JSON 格式,fail-safe 回退到传统格式
+    try:
+        from api.utils.structured_logger import JSONFormatter
+        formatter = JSONFormatter()
+    except ImportError:
+        # structured_logger 不可用时回退到传统格式
+        formatter = logging.Formatter(
+            log_format or "%(asctime)-15s %(levelname)-8s %(process)d %(message)s"
+        )
 
     handler1 = RotatingFileHandler(log_path, maxBytes=10*1024*1024, backupCount=5)
     handler1.setFormatter(formatter)

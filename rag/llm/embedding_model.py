@@ -17,6 +17,7 @@ import functools
 import json
 import os
 import threading
+import time
 from abc import ABC
 from urllib.parse import urljoin
 
@@ -66,6 +67,7 @@ class Base(ABC):
             if not breaker.allow_request():
                 raise CircuitBreakerOpenError("embedding")
 
+            start_ts = time.perf_counter()
             try:
                 self._in_breaker_call = True
                 result = original(self, *args, **kwargs)
@@ -75,6 +77,33 @@ class Base(ABC):
             finally:
                 self._in_breaker_call = False
             breaker.record_success()
+
+            # Langfuse Embedding 可观测性上报
+            try:
+                from api.utils.langfuse_client import record_llm_embedding
+                from api.utils.tracing import get_current_trace_id
+
+                duration_ms = (time.perf_counter() - start_ts) * 1000.0
+                model_name = getattr(self, "model_name", "unknown")
+                tokens = result[1] if isinstance(result, tuple) and len(result) > 1 else 0
+                output_dim = None
+                if hasattr(result[0], "shape"):
+                    output_dim = int(result[0].shape[-1]) if len(result[0].shape) > 0 else None
+                input_texts = args[0] if args else []
+                if isinstance(input_texts, str):
+                    input_texts = [input_texts]
+
+                record_llm_embedding(
+                    model=model_name,
+                    input_texts=input_texts,
+                    tokens=tokens,
+                    duration_ms=duration_ms,
+                    trace_id=get_current_trace_id(),
+                    output_dim=output_dim,
+                )
+            except Exception:
+                pass
+
             return result
 
         wrapper._breaker_wrapped = True

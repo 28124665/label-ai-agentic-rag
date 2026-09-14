@@ -58,7 +58,7 @@ class Evidence(TypedDict, total=False):
     """
 
     evidence_id: str
-    source_type: Literal["rag", "db", "web", "report"]
+    source_type: Literal["rag", "db", "web", "rest", "report", "graph"]
     title: str
     content: str
     structured_data: dict
@@ -80,12 +80,18 @@ TOOL_SOURCE_TYPE_MAP = {
     "database": "db",
     "web_search": "web",
     "web": "web",
+    "rest": "rest",
+    "rest_search": "rest",
+    "graph": "graph",
+    "graph_tool": "graph",
     "report": "report",
 }
 
 # 各 source_type 默认权威性（与 docs §7 思想一致）
 DEFAULT_AUTHORITY_SCORE = {
     "db": 0.95,  # 数据库事实最权威
+    "rest": 0.90,  # ERP 系统数据权威性高（介于 DB 和 RAG 之间）
+    "graph": 0.90,  # 图谱结构化结果（经 LLM 合成 answer，二次加工，略低于 db）
     "rag": 0.80,  # 知识库次之
     "report": 0.85,  # 报告权威性视来源
     "web": 0.50,  # Web 可信度最低
@@ -506,6 +512,178 @@ def normalize_web_evidence(
     return evidences
 
 
+def normalize_rest_evidence(
+    rest_docs: list[dict],
+    tenant_id: str = "",
+    query: str = "",
+    erp_domain: str = "",
+) -> list[Evidence]:
+    """将 RestTool/ERP 结果标准化为 Evidence 列表。
+
+    设计原则（docs/RestTool与MCP服务对接设计方案.md §4）：
+    - authority_score = 0.90（介于 DB 0.95 和 RAG 0.80 之间）
+    - ERP 系统数据视为实时数据，freshness_score = 1.0
+    - source_uri 格式：rest://{erp_domain}/{function}/{endpoint}
+
+    Args:
+        rest_docs: RestTool 返回的 docs 列表
+        tenant_id: 租户 ID
+        query: 查询语句
+        erp_domain: ERP 领域（hr/supply_chain/finance）
+
+    Returns:
+        list[Evidence]: 标准化后的 Evidence 列表
+    """
+    evidences: list[Evidence] = []
+    for doc in rest_docs or []:
+        content_raw = doc.get("content") or doc.get("data") or ""
+        if isinstance(content_raw, dict):
+            import json
+            content_raw = json.dumps(content_raw, ensure_ascii=False, default=str)
+        content, truncated = _truncate_content(content_raw, max_chars=2000)
+        content = _scrub_sensitive(content)
+
+        quality = float(doc.get("quality_score", 0.85) or 0.85)
+        function_name = doc.get("function", "")
+        endpoint = doc.get("endpoint", "")
+        method = doc.get("method", "GET")
+        doc_erp_domain = doc.get("erp_domain", erp_domain)
+
+        source_uri = f"rest://{doc_erp_domain}/{function_name}/{endpoint}" if doc_erp_domain else f"rest://{function_name or 'unknown'}"
+
+        ev: Evidence = {
+            "evidence_id": _make_evidence_id(source_uri, content_raw),
+            "source_type": "rest",
+            "title": doc.get("title", "") or f"ERP 查询结果（{function_name or '未知'}）",
+            "content": content,
+            "structured_data": doc.get("data") if isinstance(doc.get("data"), dict) else {},
+            "source_uri": source_uri,
+            "tenant_id": tenant_id,
+            "confidence": max(0.0, min(1.0, quality)),
+            "relevance_score": max(0.0, min(1.0, quality)),
+            "authority_score": DEFAULT_AUTHORITY_SCORE["rest"],
+            "freshness_score": 1.0,  # ERP 系统数据视为实时
+            "created_at": _now_iso(),
+            "metadata": {
+                "function": function_name,
+                "endpoint": endpoint,
+                "method": method,
+                "erp_domain": doc_erp_domain,
+                "truncated": truncated,
+                "query": query,
+            },
+        }
+        evidences.append(ev)
+    return evidences
+
+
+def normalize_graph_evidence(
+    graph_result: dict,
+    tenant_id: str = "",
+    query: str = "",
+) -> list[Evidence]:
+    """将 GraphTool/GraphQAPipeline 结果标准化为 Evidence 列表。
+
+    设计原则（docs/GraphTool接入设计文档.md §3.3.1）：
+    - authority_score = 0.90（结构化可追溯，略低于 db，因 answer 由 LLM 二次合成）
+    - freshness_score = 1.0（图谱数据视为实时）
+    - source_uri 格式：graph://neo4j/<Label>/<Key>（缺省 graph://neo4j/graph）
+    - row_count == 0 或 error 非空时跳过（交由质量检查降级）
+
+    Args:
+        graph_result: GraphTool 返回的 GraphQAResult 结构
+        tenant_id: 租户 ID
+        query: 查询语句
+
+    Returns:
+        list[Evidence]: 标准化后的 Evidence 列表（空列表表示无有效证据）
+    """
+    if not graph_result:
+        return []
+
+    import json
+
+    error = graph_result.get("error", "") or ""
+    rows = graph_result.get("rows", []) or []
+    row_count = graph_result.get("row_count", len(rows))
+    answer = graph_result.get("answer", "") or ""
+    quality = float(graph_result.get("quality_score", 0.85) or 0.85)
+
+    # error 非空或空结果：不产出 Evidence，交由质量检查降级
+    if error or row_count == 0:
+        return []
+
+    # content 构造：优先 answer 文本，否则逐行拼接
+    if answer:
+        content_raw = answer
+    else:
+        parts: list[str] = []
+        for row in rows:
+            if isinstance(row, dict):
+                parts.append(json.dumps(row, ensure_ascii=False, default=str))
+            else:
+                parts.append(str(row))
+        content_raw = "\n".join(parts)
+
+    content, truncated = _truncate_content(content_raw, max_chars=2000)
+    content = _scrub_sensitive(content)
+
+    # source_uri 提取：从 rows 首行提取 Label/Key
+    source_uri = _extract_graph_source_uri(rows)
+    evidence_id = _make_evidence_id(source_uri, content_raw)
+
+    ev: Evidence = {
+        "evidence_id": evidence_id,
+        "source_type": "graph",
+        "title": graph_result.get("title", "") or f"图谱查询结果（{row_count} 行）",
+        "content": content,
+        "structured_data": {"rows": rows, "row_count": row_count},
+        "source_uri": source_uri,
+        "tenant_id": tenant_id,
+        "confidence": max(0.0, min(1.0, quality)),
+        "relevance_score": max(0.0, min(1.0, quality)),
+        "authority_score": DEFAULT_AUTHORITY_SCORE["graph"],
+        "freshness_score": 1.0,  # 图谱数据视为实时
+        "created_at": _now_iso(),
+        "metadata": {
+            "row_count": row_count,
+            "source_type": graph_result.get("source_type", ""),
+            "truncated": truncated,
+            "query": query,
+        },
+    }
+    return [ev]
+
+
+def _extract_graph_source_uri(rows: list) -> str:
+    """从图谱结果 rows 首行提取 Label/Key，构造 source_uri。
+
+    Args:
+        rows: 图谱查询结果行列表
+
+    Returns:
+        str: graph://neo4j/<Label>/<Key>，缺省 graph://neo4j/graph
+    """
+    if not rows:
+        return "graph://neo4j/graph"
+
+    first = rows[0]
+    if isinstance(first, dict):
+        # 优先显式 Label/Key 字段
+        label = first.get("label") or first.get("Label") or first.get("_label") or ""
+        key = first.get("key") or first.get("Key") or first.get("_key") or ""
+        if not key:
+            # 尝试常见主键列
+            for pk in ("id", "ID", "Id", "name", "Name", "uuid", "uid"):
+                if pk in first and first[pk] not in ("", None):
+                    key = f"{pk}={first[pk]}"
+                    break
+        if label or key:
+            return f"graph://neo4j/{label or 'graph'}/{key or 'unknown'}"
+        return "graph://neo4j/graph"
+    return "graph://neo4j/graph"
+
+
 def normalize_tool_result(
     tool_name: str,
     result: dict,
@@ -536,5 +714,11 @@ def normalize_tool_result(
     if source_type == "report":
         # 报表 Evidence 暂复用 DB 标准化逻辑
         return normalize_db_evidence(result, tenant_id=tenant_id, query=query)
+    if source_type == "rest":
+        docs = result.get("docs") or result.get("rest_docs") or []
+        erp_domain = result.get("erp_domain", "")
+        return normalize_rest_evidence(docs, tenant_id=tenant_id, query=query, erp_domain=erp_domain)
+    if source_type == "graph":
+        return normalize_graph_evidence(result, tenant_id=tenant_id, query=query)
 
     return []

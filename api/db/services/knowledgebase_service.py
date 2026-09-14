@@ -18,7 +18,7 @@ from datetime import datetime
 from peewee import fn, JOIN
 
 from api.db import TenantPermission
-from api.db.db_models import DB, Document, Knowledgebase, User, UserTenant, UserCanvas
+from api.db.db_models import DB, Document, KBUserPermission, Knowledgebase, User, UserTenant, UserCanvas
 from api.db.services.common_service import CommonService
 from common.time_utils import current_timestamp, datetime_format
 from api.db.services import duplicate_name
@@ -171,7 +171,13 @@ class KnowledgebaseService(CommonService):
             kbs = cls.model.select(*fields).join(User, on=(cls.model.tenant_id == User.id)).where(
                 ((cls.model.tenant_id.in_(joined_tenant_ids) & (cls.model.permission ==
                                                                 TenantPermission.TEAM.value)) | (
-                    cls.model.tenant_id == user_id))
+                    cls.model.tenant_id == user_id) | (
+                    cls.model.id.in_(
+                        KBUserPermission.select(KBUserPermission.kb_id).where(
+                            KBUserPermission.user_id == user_id
+                        )
+                    )
+                ))
                 & (cls.model.status == StatusEnum.VALID.value),
                 (fn.LOWER(cls.model.name).contains(keywords.lower()))
             )
@@ -179,7 +185,13 @@ class KnowledgebaseService(CommonService):
             kbs = cls.model.select(*fields).join(User, on=(cls.model.tenant_id == User.id)).where(
                 ((cls.model.tenant_id.in_(joined_tenant_ids) & (cls.model.permission ==
                                                                 TenantPermission.TEAM.value)) | (
-                    cls.model.tenant_id == user_id))
+                    cls.model.tenant_id == user_id) | (
+                    cls.model.id.in_(
+                        KBUserPermission.select(KBUserPermission.kb_id).where(
+                            KBUserPermission.user_id == user_id
+                        )
+                    )
+                ))
                 & (cls.model.status == StatusEnum.VALID.value)
             )
         if parser_id:

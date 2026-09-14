@@ -309,6 +309,7 @@ class CatalogBuilder:
 
         有 linked DataSkill → ["database", "report"]
         有 linked RetrievalSkill → 追加 "rag"
+        Skill 声明 graph 证据需求 → 追加 "graph"（设计文档 §3.4.2）
         否则 → ["report"]
         """
         caps: list[str] = ["report"]
@@ -316,7 +317,31 @@ class CatalogBuilder:
             caps.append("database")
         if self._retrieval_skills_by_report.get(report_skill.skill_id):
             caps.append("rag")
+        if self._requires_graph(report_skill):
+            caps.append("graph")
         return caps
+
+    def _requires_graph(self, report_skill: ReportSkill) -> bool:
+        """判断 Skill 是否声明 graph 证据需求（设计文档 §3.4.2）。
+
+        graph 能力以「证据来源扩展」方式接入：当一个 Skill 的
+        required_evidence_types 或 linked DataSkill/RetrievalSkill 的
+        evidence_requirements 含 graph 时，视为需要 graph 能力。
+        """
+        required_types = {t.casefold() for t in (report_skill.required_evidence_types or [])}
+        if required_types & {"graph", "graph_rows", "graph_result"}:
+            return True
+        for skill in (
+            self._data_skills_by_report.get(report_skill.skill_id),
+            self._retrieval_skills_by_report.get(report_skill.skill_id),
+        ):
+            if skill is None:
+                continue
+            for req in skill.evidence_requirements or []:
+                evidence_type = (req.get("evidence_type") or "").casefold()
+                if evidence_type in {"graph", "graph_rows", "graph_result"}:
+                    return True
+        return False
 
     @staticmethod
     def _derive_risk_level(report_type: str) -> RiskLevel:

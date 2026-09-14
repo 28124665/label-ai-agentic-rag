@@ -357,15 +357,14 @@ class SkillRouter:
             except Exception as e:
                 logger.warning("[SkillRouter] BM25 召回异常: %s", e)
 
-        # Embedding 召回
-        if self._embedding is not None:
-            try:
-                # Embedding 需要 query 向量，但 embed_func 在 build 时注入
-                # P2 阶段简化：如果 embedding_index 已构建，使用 query 向量查询
-                # 这里需要 embed_func 来向量化 query，暂时跳过
-                pass
-            except Exception as e:
-                logger.warning("[SkillRouter] Embedding 召回异常: %s", e)
+        # Embedding 召回（P2 已实现）
+        # EmbeddingRetriever.search 需要 query_embedding（list[float]），
+        # 而 embed_func 在 build() 时注入。这里从 route() 传入的
+        # llm_call_func 不适合做 embedding，需要 embed_func。
+        # SkillRouter 暂不支持 per-request embed_func，
+        # 所以 Embedding 召回在 SkillResolver 中实现（通过 resolve 的 embed_func 参数）。
+        # SkillRouter 的 _hybrid_recall 保留 embedding_retriever 检查但不执行搜索，
+        # 实际 Embedding + RRF 由 SkillResolver._embedding_recall_and_fuse() 完成。
 
         # 如果 BM25 和 Embedding 都无结果，返回空
         if not bm25_results and not embedding_results:

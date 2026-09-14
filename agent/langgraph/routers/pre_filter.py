@@ -87,12 +87,13 @@ class PreFilter:
         r"^bye[！!。.？?]?$",
     ]
 
-    # 精确指令匹配（@database / @rag / @web / /help）
+    # 精确指令匹配（@database / @rag / @web / @graph / /help）
     # 用户显式指定工具，直接路由，不经过复杂度闸门和规则路由
     DIRECTIVE_PATTERNS = [
         (re.compile(r"^@(?:database|db)\s+", re.IGNORECASE), "database"),
         (re.compile(r"^@(?:rag|kb)\s+", re.IGNORECASE), "rag"),
         (re.compile(r"^@(?:web|search)\s+", re.IGNORECASE), "web"),
+        (re.compile(r"^@(?:graph|neo4j|图谱|知识图谱)\s+", re.IGNORECASE), "graph"),
         (re.compile(r"^/(?:help|status)\b", re.IGNORECASE), "chitchat"),
     ]
 

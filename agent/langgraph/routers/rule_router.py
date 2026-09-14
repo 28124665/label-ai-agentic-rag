@@ -36,6 +36,15 @@ class RuleRouter:
         (re.compile(r"^.+的原理"), "rag", "X的原理"),
         (re.compile(r"^统计.+(?:数量|总数|人数)$"), "database", "统计X数量"),
         (re.compile(r"^查询.+(?:数量|总数|人数)$"), "database", "查询X数量"),
+        # ERP 强模式：年假/考勤/采购/报销等典型 ERP 查询
+        (re.compile(r"^查询.*(?:年假|请假|假期|休假)"), "rest", "ERP年假查询"),
+        (re.compile(r"^查询.*(?:考勤|打卡|出勤)"), "rest", "ERP考勤查询"),
+        (re.compile(r"^查询.*(?:采购|订单|PO)"), "rest", "ERP采购查询"),
+        (re.compile(r"^查询.*(?:报销|费用|差旅)"), "rest", "ERP报销查询"),
+        (re.compile(r"^我的.*(?:年假|考勤|请假|假期)"), "rest", "ERP个人查询"),
+        (re.compile(r"^.*(?:工资|薪资|薪酬|绩效).*(?:查询|多少)"), "rest", "ERP薪酬查询"),
+        # Graph 强模式：关系图谱/实体关联/多跳查询等
+        (re.compile(r"(关系图谱|知识图谱|实体关联|多跳查询|图查询|多跳)"), "graph", "图查询"),
     ]
 
     # Tier 2 弱关键词置信度参数（封顶 0.55，强制走 LLM）
@@ -141,12 +150,22 @@ class RuleRouter:
         # 7. Tier 2：弱关键词匹配（低置信度，封顶 0.55，强制走 LLM）
         db_score, db_keywords_matched = self._match_db_bias(query_lower, keywords)
         rag_score, rag_keywords_matched = self._match_rag_bias(query_lower, keywords)
+        erp_score, erp_keywords_matched = self._match_erp_bias(query_lower, keywords)
+        graph_score, graph_keywords_matched = self._match_graph_bias(query_lower, keywords)
 
         # 8. 综合打分（弱关键词，封顶 0.55，不满足 0.7 阈值，强制走 LLM）
         if db_score > 0 and rag_score > 0:
             target = "hybrid"
             confidence = min(max(db_score, rag_score), self.WEAK_CONFIDENCE_CAP)
             reason = f"混合意图: DB({', '.join(db_keywords_matched)}) + RAG({', '.join(rag_keywords_matched)})"
+        elif erp_score > db_score and erp_score > rag_score and erp_score > 0:
+            target = "rest"
+            confidence = min(erp_score, self.WEAK_CONFIDENCE_CAP)
+            reason = f"ERP 偏向词: {', '.join(erp_keywords_matched)}"
+        elif graph_score > db_score and graph_score > rag_score and graph_score > 0:
+            target = "graph"
+            confidence = min(graph_score, self.WEAK_CONFIDENCE_CAP)
+            reason = f"Graph 偏向词: {', '.join(graph_keywords_matched)}"
         elif db_score > rag_score and db_score > 0:
             target = "database"
             confidence = min(db_score, self.WEAK_CONFIDENCE_CAP)
@@ -175,8 +194,12 @@ class RuleRouter:
             metadata={
                 "db_score": db_score,
                 "rag_score": rag_score,
+                "erp_score": erp_score,
+                "graph_score": graph_score,
                 "db_keywords": db_keywords_matched,
                 "rag_keywords": rag_keywords_matched,
+                "erp_keywords": erp_keywords_matched,
+                "graph_keywords": graph_keywords_matched,
                 "scope": scope,
                 "freshness_required": freshness_required,
             },
@@ -275,6 +298,62 @@ class RuleRouter:
 
         # Tier 2 弱关键词置信度：base=0.45, bonus=0.05/词, cap=0.55
         # 最高 0.55，永远 < 0.7 阈值，强制走 LLM 确认
+        bonus = min((len(matched) - 1) * self.WEAK_BONUS_PER_KEYWORD, self.WEAK_BONUS_CAP)
+        score = self.WEAK_BASE_SCORE + bonus
+
+        return score, matched
+
+    def _match_erp_bias(self, query: str, keywords: dict) -> tuple[float, list[str]]:
+        """匹配 ERP 偏向词（Tier 2 弱关键词，置信度封顶 0.55）。
+
+        识别供应链/HR/财务等 ERP 领域查询，引导路由到 RestTool。
+
+        Args:
+            query: 用户查询（小写）
+            keywords: 关键词配置
+
+        Returns:
+            tuple: (置信度分数, 匹配的关键词列表)
+        """
+        erp_bias_keywords = keywords.get("erp_bias", [
+            "年假", "请假", "假期", "休假", "考勤", "打卡", "出勤",
+            "采购", "订单", "报销", "差旅", "费用", "工资", "薪资",
+            "薪酬", "绩效", "库存", "供应链", "人力", "财务", "员工",
+            "hr", "erp", "审批", "入职", "离职", "合同", "发票",
+            "物料", "供应商", "客户信息", "资产", "预算",
+        ])
+        matched = [kw for kw in erp_bias_keywords if kw in query]
+
+        if not matched:
+            return 0.0, []
+
+        bonus = min((len(matched) - 1) * self.WEAK_BONUS_PER_KEYWORD, self.WEAK_BONUS_CAP)
+        score = self.WEAK_BASE_SCORE + bonus
+
+        return score, matched
+
+    def _match_graph_bias(self, query: str, keywords: dict) -> tuple[float, list[str]]:
+        """匹配 Graph 偏向词（Tier 2 弱关键词，置信度封顶 0.55）。
+
+        识别图谱/实体关系相关查询，引导路由到 GraphTool。
+
+        Args:
+            query: 用户查询（小写）
+            keywords: 关键词配置
+
+        Returns:
+            tuple: (置信度分数, 匹配的关键词列表)
+        """
+        graph_bias_keywords = keywords.get("graph_bias", [
+            "图谱", "知识图谱", "关系图谱", "实体", "关系", "关联",
+            "多跳", "图查询", "neo4j", "节点", "边", "链路", "上下游",
+            "相关人", "相关人员", "组织架构", "关联方",
+        ])
+        matched = [kw for kw in graph_bias_keywords if kw in query]
+
+        if not matched:
+            return 0.0, []
+
         bonus = min((len(matched) - 1) * self.WEAK_BONUS_PER_KEYWORD, self.WEAK_BONUS_CAP)
         score = self.WEAK_BASE_SCORE + bonus
 

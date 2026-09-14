@@ -103,3 +103,58 @@ groups:
         annotations:
           summary: "High LLM cost for model {{ $labels.model }}"
           description: "LLM cost for model {{ $labels.model }} exceeded $5 in the last hour."
+
+  # -------------------------------------------------------------------
+  # P2-2: SLO 燃烧率告警
+  # -------------------------------------------------------------------
+  - name: ragflow_slo
+    interval: 30s
+    rules:
+      # SLO 1: 答案可用性 — reject + exhausted 比例 < 1%(30天错误预算 7.2h)
+      - alert: RAGSLOAnswerAvailabilityBurn
+        expr: |
+          sum(rate(rag_hallucination_action_total{action=~"reject|exhausted"}[1h]))
+          / sum(rate(rag_hallucination_action_total[1h])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          slo: answer_availability
+        annotations:
+          summary: "答案可用性 SLO 燃烧率超限,reject+exhausted 率 > 5%"
+          description: "1h 内拒答率 {{ $value | humanizePercentage }},超过 5% 阈值,错误预算快速消耗"
+
+      # SLO 2: E2E 延迟 — P95 < 8s
+      - alert: RAGSLOLatencyP95
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(rag_e2e_latency_seconds_bucket[5m]))) > 10
+        for: 5m
+        labels:
+          severity: warning
+          slo: latency_p95
+        annotations:
+          summary: "E2E 延迟 P95 > 10s"
+          description: "5min 内 P95 延迟 {{ $value }}s,超过 10s 阈值"
+
+      # SLO 3: 幻觉通过率 — pass + filter 比例 > 95%
+      - alert: RAGSLOHallucinationPassRate
+        expr: |
+          sum(rate(rag_hallucination_action_total{action="reject"}[1h]))
+          / sum(rate(rag_hallucination_action_total[1h])) > 0.10
+        for: 10m
+        labels:
+          severity: critical
+          slo: hallucination_pass_rate
+        annotations:
+          summary: "幻觉通过率 SLO 违约,reject 率 > 10%"
+
+      # SLO 4: 检索成功率 — 非 fallback_web 比例 > 98%
+      - alert: RAGSLORetrievalSuccess
+        expr: |
+          sum(rate(rag_quality_check_decision_total{decision="fallback_web"}[1h]))
+          / sum(rate(rag_quality_check_decision_total[1h])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          slo: retrieval_success
+        annotations:
+          summary: "检索成功率 SLO 违约,fallback_web 率 > 5%"

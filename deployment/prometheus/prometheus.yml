@@ -1,0 +1,26 @@
+# Prometheus 主配置
+# P2-3: 之前缺失,补齐后 docker-compose 监控栈可自洽运行
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - alert_rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+scrape_configs:
+  - job_name: ragflow
+    metrics_path: /metrics
+    bearer_token: ${METRICS_TOKEN}
+    static_configs:
+      - targets:
+          - data-knowledge-api-cpu:9380
+        labels:
+          service: ragflow
+          environment: ${CONFIG_ENV}

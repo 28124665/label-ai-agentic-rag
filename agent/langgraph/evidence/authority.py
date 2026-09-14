@@ -41,6 +41,7 @@ from typing import Any, Optional
 # 默认来源权重（与 evidence/models.py DEFAULT_AUTHORITY_SCORE 保持一致，避免双源不一致）
 DEFAULT_SOURCE_WEIGHTS: dict[str, float] = {
     "db": 0.95,      # 数据库事实最权威
+    "rest": 0.90,    # ERP 系统数据权威性高（介于 DB 和 RAG 之间）
     "rag": 0.80,     # 知识库次之
     "report": 0.85,  # 报告权威性视来源
     "web": 0.50,     # Web 可信度最低

@@ -32,6 +32,7 @@ from agent.langgraph.executor.dag_scheduler import DAGScheduler
 from agent.langgraph.executor.result_aggregator import ResultAggregator
 from agent.langgraph.executor.tool_dispatcher import ToolDispatcher
 from agent.langgraph.routers.models import ExecutionPlan, PlanStep, StepArgs
+from agent.langgraph.tools.contract import ToolOutcome
 
 
 # ============================================================================
@@ -378,14 +379,14 @@ class TestResultAggregator:
 class TestToolDispatcher:
     """测试工具分发器。
 
-    注意：由于 database_tool/rag_tool 模块导入时会加载重型依赖（MCP、DB 连接等），
-    测试中直接 mock ToolDispatcher 的私有方法 _execute_database/_execute_rag/_execute_web，
-    验证 dispatch 方法的路由逻辑、参数传递和异常处理。
+    注意：由于 database_tool/rag_tool 等底层模块会加载重型依赖（MCP、DB 连接等），
+    测试中 mock 工具注册表（ToolRegistry）的 dispatch，验证 ToolDispatcher.dispatch 的
+    路由、参数传递、字段回填与异常处理（工具实际执行逻辑由各 Adapter 单测覆盖）。
     """
 
     @pytest.mark.asyncio
     async def test_dispatch_database_routes_correctly(self):
-        """测试 database 类型步骤路由到 _execute_database。"""
+        """测试 database 类型步骤：路由并回填 db_result 平铺字段。"""
         step = PlanStep(
             step_id="s1",
             tool="database",
@@ -394,26 +395,36 @@ class TestToolDispatcher:
         state = {"user_question": "原始问题", "db_id": "default_db"}
 
         dispatcher = ToolDispatcher()
-        expected_result = {
-            "db_result": {"rows": [{"cost": 100}], "row_count": 1},
-            "db_quality_score": 0.9,
-            "db_id": "hr_system",
-        }
-        with patch.object(
-            dispatcher, "_execute_database", new_callable=AsyncMock
-        ) as mock_exec:
-            mock_exec.return_value = expected_result
+        outcome = ToolOutcome(
+            success=True,
+            tool="database",
+            payload={
+                "db_result": {"rows": [{"cost": 100}], "row_count": 1},
+                "db_quality_score": 0.9,
+                "db_id": "hr_system",
+            },
+        )
+        with patch(
+            "agent.langgraph.tools.registry.get_tool_registry"
+        ) as mock_get_registry:
+            mock_registry = AsyncMock()
+            mock_get_registry.return_value = mock_registry
+            mock_registry.dispatch.return_value = outcome
             result = await dispatcher.dispatch(step, state, {})
 
         assert result["success"] is True
         assert result["step_id"] == "s1"
         assert result["tool"] == "database"
         assert result["db_id"] == "hr_system"
-        mock_exec.assert_called_once_with(step, state)
+        mock_registry.dispatch.assert_called_once()
+        name, input_data = mock_registry.dispatch.call_args.args[:2]
+        assert name == "database"
+        assert input_data["step"] is step
+        assert input_data["state"] is state
 
     @pytest.mark.asyncio
     async def test_dispatch_rag_routes_correctly(self):
-        """测试 rag 类型步骤路由到 _execute_rag。"""
+        """测试 rag 类型步骤：路由并回填 rag_docs 平铺字段。"""
         step = PlanStep(
             step_id="s1",
             tool="rag",
@@ -422,27 +433,35 @@ class TestToolDispatcher:
         state = {"user_question": "原始问题"}
 
         dispatcher = ToolDispatcher()
-        expected_result = {
-            "rag_docs": [{"content": "报告", "score": 0.8}],
-            "rag_quality_score": 0.8,
-            "rag_has_relevant": True,
-            "rag_relevant_count": 1,
-            "rag_top_score": 0.8,
-            "kb_ids": ["report_kb"],
-        }
-        with patch.object(
-            dispatcher, "_execute_rag", new_callable=AsyncMock
-        ) as mock_exec:
-            mock_exec.return_value = expected_result
+        outcome = ToolOutcome(
+            success=True,
+            tool="rag",
+            payload={
+                "rag_docs": [{"content": "报告", "score": 0.8}],
+                "rag_quality_score": 0.8,
+                "rag_has_relevant": True,
+                "rag_relevant_count": 1,
+                "rag_top_score": 0.8,
+                "kb_ids": ["report_kb"],
+            },
+        )
+        with patch(
+            "agent.langgraph.tools.registry.get_tool_registry"
+        ) as mock_get_registry:
+            mock_registry = AsyncMock()
+            mock_get_registry.return_value = mock_registry
+            mock_registry.dispatch.return_value = outcome
             result = await dispatcher.dispatch(step, state, {})
 
         assert result["success"] is True
         assert result["rag_docs"][0]["content"] == "报告"
-        mock_exec.assert_called_once_with(step, state)
+        mock_registry.dispatch.assert_called_once()
+        name, input_data = mock_registry.dispatch.call_args.args[:2]
+        assert name == "rag"
 
     @pytest.mark.asyncio
     async def test_dispatch_web_routes_correctly(self):
-        """测试 web 类型步骤路由到 _execute_web。"""
+        """测试 web 类型步骤：路由并回填 web_docs 平铺字段。"""
         step = PlanStep(
             step_id="s1",
             tool="web",
@@ -451,16 +470,23 @@ class TestToolDispatcher:
         state = {"user_question": "原始问题"}
 
         dispatcher = ToolDispatcher()
-        expected_result = {"web_docs": [{"content": "网页", "url": "http://1"}]}
-        with patch.object(
-            dispatcher, "_execute_web", new_callable=AsyncMock
-        ) as mock_exec:
-            mock_exec.return_value = expected_result
+        outcome = ToolOutcome(
+            success=True,
+            tool="web",
+            payload={"web_docs": [{"content": "网页", "url": "http://1"}]},
+        )
+        with patch(
+            "agent.langgraph.tools.registry.get_tool_registry"
+        ) as mock_get_registry:
+            mock_registry = AsyncMock()
+            mock_get_registry.return_value = mock_registry
+            mock_registry.dispatch.return_value = outcome
             result = await dispatcher.dispatch(step, state, {})
 
         assert result["success"] is True
         assert result["web_docs"][0]["content"] == "网页"
-        mock_exec.assert_called_once_with(step, state)
+        mock_registry.dispatch.assert_called_once()
+        assert mock_registry.dispatch.call_args.args[0] == "web"
 
     @pytest.mark.asyncio
     async def test_dispatch_handles_exception(self):
@@ -473,10 +499,12 @@ class TestToolDispatcher:
         state = {"user_question": "查询"}
 
         dispatcher = ToolDispatcher()
-        with patch.object(
-            dispatcher, "_execute_database", new_callable=AsyncMock
-        ) as mock_exec:
-            mock_exec.side_effect = RuntimeError("DB 连接失败")
+        with patch(
+            "agent.langgraph.tools.registry.get_tool_registry"
+        ) as mock_get_registry:
+            mock_registry = AsyncMock()
+            mock_get_registry.return_value = mock_registry
+            mock_registry.dispatch.side_effect = RuntimeError("DB 连接失败")
             result = await dispatcher.dispatch(step, state, {})
 
         assert result["success"] is False

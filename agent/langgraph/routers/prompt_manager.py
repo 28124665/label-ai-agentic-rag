@@ -104,6 +104,9 @@ class PromptManager:
 ## 用户查询
 {query}
 
+## 可用知识库
+{kb_metadata}
+
 ## 分类规则
 1. **database**: 查询数据、统计、聚合、表结构、SQL 相关
 2. **rag**: 查询知识、概念、定义、解释、文档内容
@@ -118,6 +121,7 @@ class PromptManager:
   "confidence": 0.0-1.0,
   "reason": "路由理由",
   "complexity": "simple|moderate|complex",
+  "kb_ids": [],
   "sub_intents": [],
   "entities": {{}},
   "needs_clarification": false,
@@ -132,6 +136,9 @@ class PromptManager:
 ## 上下文信息
 {context}
 
+## 可用知识库
+{kb_metadata}
+
 ## 输出格式
 请严格输出 JSON 格式：
 {{
@@ -140,7 +147,7 @@ class PromptManager:
     {{
       "step_id": "step1",
       "tool": "database|rag|web",
-      "args": {{"query": "子查询"}},
+      "args": {{"query": "子查询", "kb_ids": []}},
       "depends_on": [],
       "can_parallel": false
     }}

@@ -69,6 +69,12 @@ def _record_generation_metrics(
     start_ts: float,
     node: str = "generate",
     status: str = "success",
+    # === P0/P1: Langfuse enriched parameters ===
+    history: list = None,
+    response: str = None,
+    gen_conf: dict = None,
+    retry_count: int = 0,
+    error_type: str = None,
 ) -> None:
     """Record LLM token consumption, cost and latency metrics."""
     try:
@@ -76,8 +82,46 @@ def _record_generation_metrics(
         model = model_name or "unknown"
         metrics.rag_generate_latency_seconds.labels(model=model).observe(duration_ms / 1000.0)
         metrics.record_llm_tokens(model, node, tokens)
+
+        # P1-1: OTel span 记录 LLM 调用维度
+        try:
+            from api.utils.tracing import get_tracer, get_current_trace_id
+            tracer = get_tracer(__name__)
+            if tracer is not None:
+                with tracer.start_as_current_span(f"llm.chat.{model}") as span:
+                    span.set_attribute("llm.model", model)
+                    span.set_attribute("llm.tokens", tokens)
+                    span.set_attribute("llm.node", node)
+                    span.set_attribute("llm.duration_ms", duration_ms)
+                    span.set_attribute("llm.status", status)
+        except Exception:
+            pass
+
+        # P2-1: Langfuse LLM 可观测性上报
+        try:
+            from api.utils.langfuse_client import record_llm_generation
+            _temp = gen_conf.get("temperature") if gen_conf else None
+            _max_tok = gen_conf.get("max_tokens") if gen_conf else None
+            record_llm_generation(
+                model=model,
+                tokens=tokens,
+                total_tokens=tokens,
+                duration_ms=duration_ms,
+                status=status,
+                trace_id=get_current_trace_id(),
+                input=history,
+                output=response,
+                name=node,
+                temperature=_temp,
+                max_tokens=_max_tok,
+                retry_count=retry_count,
+                error_type=error_type if status == "error" else None,
+            )
+        except Exception:
+            pass
+
         log_generation(
-            trace_id="",
+            trace_id=get_current_trace_id(),
             span_id="",
             duration_ms=duration_ms,
             status=status,
@@ -220,14 +264,15 @@ class Base(ABC):
                     yield ans
 
                 self._breaker.record_success()
-                _record_generation_metrics(self.model_name, total_tokens, start_ts)
+                _record_generation_metrics(self.model_name, total_tokens, start_ts, history=history, response=ans, gen_conf=gen_conf)
                 yield total_tokens
                 return
             except Exception as e:
                 e = await self._exceptions_async(e, attempt)
                 if e:
                     self._breaker.record_failure()
-                    _record_generation_metrics(self.model_name, total_tokens, start_ts, status="error")
+                    _error_type = str(e).split(" - ")[0].replace("**ERROR**: ", "") if isinstance(e, str) and str(e).startswith("**ERROR**") else None
+                    _record_generation_metrics(self.model_name, total_tokens, start_ts, status="error", history=history, gen_conf=gen_conf, retry_count=attempt, error_type=_error_type)
                     yield e
                     yield total_tokens
                     return
@@ -536,13 +581,14 @@ class Base(ABC):
             try:
                 result = await self._async_chat(history, gen_conf, **kwargs)
                 self._breaker.record_success()
-                _record_generation_metrics(self.model_name, result[1], start_ts)
+                _record_generation_metrics(self.model_name, result[1], start_ts, history=history, response=result[0], gen_conf=gen_conf)
                 return result
             except Exception as e:
                 e = await self._exceptions_async(e, attempt)
                 if e:
                     self._breaker.record_failure()
-                    _record_generation_metrics(self.model_name, 0, start_ts, status="error")
+                    _error_type = str(e).split(" - ")[0].replace("**ERROR**: ", "") if isinstance(e, str) and str(e).startswith("**ERROR**") else None
+                    _record_generation_metrics(self.model_name, 0, start_ts, status="error", history=history, gen_conf=gen_conf, retry_count=attempt, error_type=_error_type)
                     return e, 0
         assert False, "Shouldn't be here."
 
@@ -1318,7 +1364,7 @@ class LiteLLMBase(ABC):
 
                 if any([not response.choices, not response.choices[0].message, not response.choices[0].message.content]):
                     self._breaker.record_success()
-                    _record_generation_metrics(self.model_name, 0, start_ts)
+                    _record_generation_metrics(self.model_name, 0, start_ts, history=hist, gen_conf=gen_conf)
                     return "", 0
                 ans = response.choices[0].message.content.strip()
                 if response.choices[0].finish_reason == "length":
@@ -1326,13 +1372,14 @@ class LiteLLMBase(ABC):
 
                 self._breaker.record_success()
                 tokens = total_token_count_from_response(response)
-                _record_generation_metrics(self.model_name, tokens, start_ts)
+                _record_generation_metrics(self.model_name, tokens, start_ts, history=hist, response=ans, gen_conf=gen_conf)
                 return ans, tokens
             except Exception as e:
                 e = await self._exceptions_async(e, attempt)
                 if e:
                     self._breaker.record_failure()
-                    _record_generation_metrics(self.model_name, 0, start_ts, status="error")
+                    _error_type = str(e).split(" - ")[0].replace("**ERROR**: ", "") if isinstance(e, str) and str(e).startswith("**ERROR**") else None
+                    _record_generation_metrics(self.model_name, 0, start_ts, status="error", history=hist, gen_conf=gen_conf, retry_count=attempt, error_type=_error_type)
                     return e, 0
 
         assert False, "Shouldn't be here."
@@ -1396,14 +1443,15 @@ class LiteLLMBase(ABC):
 
                     yield ans
                 self._breaker.record_success()
-                _record_generation_metrics(self.model_name, total_tokens, start_ts)
+                _record_generation_metrics(self.model_name, total_tokens, start_ts, history=history, gen_conf=gen_conf, node="generate_streamly")
                 yield total_tokens
                 return
             except Exception as e:
                 e = await self._exceptions_async(e, attempt)
                 if e:
                     self._breaker.record_failure()
-                    _record_generation_metrics(self.model_name, total_tokens, start_ts, status="error")
+                    _error_type = str(e).split(" - ")[0].replace("**ERROR**: ", "") if isinstance(e, str) and str(e).startswith("**ERROR**") else None
+                    _record_generation_metrics(self.model_name, total_tokens, start_ts, status="error", history=history, gen_conf=gen_conf, retry_count=attempt, error_type=_error_type)
                     yield e
                     yield total_tokens
                     return

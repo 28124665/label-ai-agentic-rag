@@ -71,13 +71,19 @@ async def rag_tool_node(state: AgentState) -> dict[str, Any]:
     # 详见设计文档 §4.4：策略轮转公式 strategies[(retry_count + attempt) % len]
     retry_count = state.get("retry_count", 0)
 
+    # ★ 多KB选择策略：优先使用 route_decision.kb_ids（LLM Router / Planner 推荐），
+    # 否则回退到 state.kb_ids（Agent 配置的默认知识库）
+    route_decision = state.get("route_decision", {}) or {}
+    recommended_kb_ids = route_decision.get("kb_ids", []) if isinstance(route_decision, dict) else getattr(route_decision, "kb_ids", [])
+    kb_ids = recommended_kb_ids if recommended_kb_ids else state.get("kb_ids", [])
+
     input_data = {
         "query": user_question,
         "query_simplified": query_simplified or user_question,
         "top_k": rag_config.get("top_k", 5),
         "enable_rewrite": rag_config.get("enable_rewrite", True),
         "enable_rerank": rag_config.get("enable_rerank", True),
-        "kb_ids": state.get("kb_ids", []),
+        "kb_ids": kb_ids,
         "tenant_id": state.get("tenant_id", ""),
         "llm_id": state.get("llm_id", ""),
         "cross_languages": rag_config.get("cross_languages", []),

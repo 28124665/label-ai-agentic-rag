@@ -18,14 +18,16 @@ class RouteDecision(BaseModel):
         source: 决策来源（rule/llm/planner/prefilter/react_planner）
         reason: 决策理由
         complexity: 复杂度（simple/moderate/complex）
+        kb_ids: 推荐的知识库 ID 列表（LLM Router / Planner 可指定）
         metadata: 附加信息（entities、sub_intents、plan 等）
     """
 
-    target: Literal["rag", "database", "web", "hybrid", "chitchat"]
+    target: Literal["rag", "database", "web", "rest", "hybrid", "chitchat", "graph"]
     confidence: float = Field(ge=0.0, le=1.0)
     source: Literal["rule", "llm", "planner", "prefilter", "react_planner"]
     reason: str = ""
     complexity: Literal["simple", "moderate", "complex"] = "simple"
+    kb_ids: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -48,6 +50,20 @@ class StepArgs(BaseModel):
     db_id: str = ""
     mcp_server_name: str = ""
     search_engine: str = ""
+    # RestTool 专用字段（§2.2 Function Declaration 映射）
+    function: str = ""
+    function_params: dict[str, Any] = Field(default_factory=dict)
+    rest_endpoint: str = ""
+    rest_method: str = ""
+    rest_payload: dict[str, Any] = Field(default_factory=dict)
+    erp_domain: str = ""
+    # GraphTool 专用字段
+    source_type: str = "Meeting"
+    enable_pg: bool = False
+    max_rows: int = 20
+    max_result_chars: int = 12000
+    enable_hybrid_retrieval: bool = False
+    timeout_ms: int = 30000
     extra: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
@@ -65,7 +81,12 @@ class StepArgs(BaseModel):
         # 过滤掉不属于 StepArgs 的字段，避免 Pydantic 验证警告
         known_fields = {
             "query", "query_simplified", "kb_ids", "db_id",
-            "mcp_server_name", "search_engine", "extra"
+            "mcp_server_name", "search_engine",
+            "function", "function_params", "rest_endpoint",
+            "rest_method", "rest_payload", "erp_domain",
+            "source_type", "enable_pg", "max_rows",
+            "max_result_chars", "enable_hybrid_retrieval", "timeout_ms",
+            "extra"
         }
         filtered = {k: v for k, v in data.items() if k in known_fields}
         return cls(**filtered)
@@ -84,7 +105,7 @@ class PlanStep(BaseModel):
     """
 
     step_id: str
-    tool: Literal["rag", "database", "web", "report"]
+    tool: Literal["rag", "database", "web", "rest", "report", "graph"]
     args: StepArgs = Field(default_factory=StepArgs)
     depends_on: list[str] = Field(default_factory=list)
     can_parallel: bool = False
@@ -138,6 +159,6 @@ class ClarificationRequest(BaseModel):
     """
 
     question: str
-    options: list[Literal["rag", "database", "web", "hybrid", "chitchat"]] = Field(
+    options: list[Literal["rag", "database", "web", "rest", "hybrid", "chitchat", "graph"]] = Field(
         default_factory=list
     )

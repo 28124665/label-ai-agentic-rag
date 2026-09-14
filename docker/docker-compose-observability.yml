@@ -1,0 +1,139 @@
+# 可观测性监控栈(本地开发用)
+# 启动: docker compose -f docker/docker-compose-observability.yml up -d
+# 停止: docker compose -f docker/docker-compose-observability.yml down
+# Sentry / Langfuse 需显式启用 profile: --profile sentry --profile langfuse
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: data-knowledge-api-prometheus
+    volumes:
+      - ../deployment/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../deployment/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - data-knowledge-api
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: data-knowledge-api-grafana
+    volumes:
+      - ../deployment/grafana/dashboard.json:/var/lib/grafana/dashboards/ragflow.json:ro
+      - ../deployment/grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ../deployment/grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    networks:
+      - data-knowledge-api
+    depends_on:
+      - prometheus
+      - loki
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: data-knowledge-api-loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - data-knowledge-api
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.55
+    container_name: data-knowledge-api-jaeger
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14250:14250"  # gRPC (OTel Collector 上报)
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    networks:
+      - data-knowledge-api
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.95.0
+    container_name: data-knowledge-api-otel-collector
+    volumes:
+      - ../deployment/otel/collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"  # OTLP gRPC (应用上报)
+      - "4318:4318"  # OTLP HTTP
+    networks:
+      - data-knowledge-api
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
+  # Sentry self-hosted 需走官方 onpremise 部署,此处仅占位
+  # 实际部署: git clone https://github.com/getsentry/self-hosted.git && cd self-hosted && ./install.sh
+  sentry:
+    image: sentry-self-hosted-local:latest
+    container_name: data-knowledge-api-sentry
+    profiles:
+      - sentry
+    ports:
+      - "9000:9000"
+    networks:
+      - data-knowledge-api
+    restart: unless-stopped
+
+  # Langfuse 需配合 PostgreSQL + ClickHouse
+  langfuse:
+    image: langfuse/langfuse:2.60.0
+    container_name: data-knowledge-api-langfuse
+    profiles:
+      - langfuse
+    ports:
+      - "3001:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-db:5432/langfuse
+      NEXTAUTH_URL: http://localhost:3001
+      NEXTAUTH_SECRET: langfuse-secret-change-me
+      SALT: langfuse-salt-change-me
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+    depends_on:
+      - langfuse-db
+      - langfuse-clickhouse
+    networks:
+      - data-knowledge-api
+    restart: unless-stopped
+
+  langfuse-db:
+    image: postgres:15-alpine
+    container_name: data-knowledge-api-langfuse-db
+    profiles:
+      - langfuse
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - langfuse-db-data:/var/lib/postgresql/data
+    networks:
+      - data-knowledge-api
+    restart: unless-stopped
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: data-knowledge-api-langfuse-clickhouse
+    profiles:
+      - langfuse
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+    networks:
+      - data-knowledge-api
+    restart: unless-stopped
+
+networks:
+  data-knowledge-api:
+    external: true
+
+volumes:
+  langfuse-db-data:
+  langfuse-clickhouse-data:
